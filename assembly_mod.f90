@@ -1,7 +1,8 @@
 !-----------------------------------------------------------------------
 ! MODULE: assembly_mod
 !> @brief Boundary element integration and matrix assembly routines
-!>        (GHMATEQ, EXTINEQ, LOCINEQ, INTEREQ, SIGMAEQ).
+!>        (GHMATEQ, EXTINEQ, LOCINEQ, INTEREQ, SIGMAEQ) parallelized
+!>        with OpenMP.
 !-----------------------------------------------------------------------
 module assembly_mod
     use data_mod
@@ -10,8 +11,9 @@ module assembly_mod
 contains
 
     !-------------------------------------------------------------------
-    !> @brief Computes the G and H matrices and forms the linear system
-    !>        A * X = F (where A is stored in H and F is stored in FI).
+    !> @brief Computes the G and H matrices in parallel using OpenMP
+    !>        and forms the linear system A * X = F (where A is stored
+    !>        in H and F is stored in FI).
     !-------------------------------------------------------------------
     subroutine GHMATEQ()
         implicit none
@@ -26,7 +28,8 @@ contains
         Y(N + 1) = Y(1)
 
         ! Compute the GW and HW matrices for each collocation point
-        ! and each boundary element
+        ! and each boundary element in parallel across CPU threads
+        !$omp parallel do default(shared) private(LL, I, K, J, NODO, HW, GW) schedule(dynamic)
         do LL = 1, N
             do I = 1, N - 1, 2
                 if ((LL - I) * (LL - I - 1) * (LL - I - 2) * (LL - I + N - 2) == 0) then
@@ -51,6 +54,7 @@ contains
                 end do
             end do
         end do
+        !$omp end parallel do
 
         ! Compute the diagonal coefficients of the H matrix (rigid body motion)
         do I = 1, N
@@ -128,17 +132,18 @@ contains
         real, intent(in)  :: XP, YP, X1, Y1, X2, Y2, X3, Y3
         real, intent(out) :: HW(2, 6), GW(2, 6)
 
-        real :: GI(10), OME(10)
+        real, parameter :: GI(10) = [ &
+            0.9739065285, -0.9739065285,  0.8650633666, -0.8650633666, &
+            0.6794095683, -0.6794095682,  0.4333953941, -0.4333953941, &
+            0.1488743389, -0.1488743389 ]
+        real, parameter :: OME(10) = [ &
+            0.0666713443, 0.0666713443,  0.1494513491, 0.1494513491, &
+            0.2190863625, 0.2190863625,  0.2692667193, 0.2692667193, &
+            0.2955242247, 0.2955242247 ]
+
         real :: A, B, C, D, DE
         real :: F1, F2, F3, XCO, YCO, XJA, ETA1, ETA2, RA, RD1, RD2, RDN
         integer :: I
-
-        data GI / 0.9739065285, -0.9739065285,  0.8650633666, -0.8650633666, &
-                  0.6794095683, -0.6794095682,  0.4333953941, -0.4333953941, &
-                  0.1488743389, -0.1488743389 /
-        data OME / 0.0666713443, 0.0666713443,  0.1494513491, 0.1494513491, &
-                   0.2190863625, 0.2190863625,  0.2692667193, 0.2692667193, &
-                   0.2955242247, 0.2955242247 /
 
         HW = 0.0
         GW = 0.0
@@ -214,28 +219,31 @@ contains
         integer, intent(in) :: NODO
         real, intent(out)   :: GW(2, 6)
 
-        real :: GI(10), OME(10), GIL(10), OMEL(10)
+        ! Data for standard Gauss quadrature
+        real, parameter :: GI(10) = [ &
+            0.9739065285, -0.9739065285,  0.8650633666, -0.8650633666, &
+            0.6794095682, -0.6794095682,  0.4333953941, -0.4333953941, &
+            0.1488743389, -0.1488743389 ]
+        real, parameter :: OME(10) = [ &
+            0.0666713443, 0.0666713443,  0.1494513491, 0.1494513491, &
+            0.2190863625, 0.2190863625,  0.2692667193, 0.2692667193, &
+            0.2955242247, 0.2955242247 ]
+
+        ! Data for logarithmic quadrature
+        real, parameter :: GIL(10) = [ &
+            0.0090426309, 0.0539712662, 0.1353118246, 0.2470524162, &
+            0.3802125396, 0.5237923179, 0.6657752055, 0.7941904160, &
+            0.8981610912, 0.9688479887 ]
+        real, parameter :: OMEL(10) = [ &
+            0.1209551319, 0.1863635425, 0.1956608732, 0.1735771421, &
+            0.1356956729, 0.0936467585, 0.0557877273, 0.0271598109, &
+            0.0095151826, 0.0016381576 ]
+
         real :: X1, Y1, X2, Y2, X3, Y3
         real :: A1, B1, A2, B2, A, B, C, CONT1, CONT2
         real :: T1, T2, T3, F1, F2, F3, FL1, FL2, FL3, FLN1, FLN2, FLN3
         real :: XJA1, XJA11, XJA2, XLO, S1, S2, S3
         integer :: I
-
-        ! Data for standard Gauss quadrature
-        data GI / 0.9739065285, -0.9739065285,  0.8650633666, -0.8650633666, &
-                  0.6794095682, -0.6794095682,  0.4333953941, -0.4333953941, &
-                  0.1488743389, -0.1488743389 /
-        data OME / 0.0666713443, 0.0666713443,  0.1494513491, 0.1494513491, &
-                   0.2190863625, 0.2190863625,  0.2692667193, 0.2692667193, &
-                   0.2955242247, 0.2955242247 /
-
-        ! Data for logarithmic quadrature
-        data GIL / 0.0090426309, 0.0539712662, 0.1353118246, 0.2470524162, &
-                   0.3802125396, 0.5237923179, 0.6657752055, 0.7941904160, &
-                   0.8981610912, 0.9688479887 /
-        data OMEL / 0.1209551319, 0.1863635425, 0.1956608732, 0.1735771421, &
-                    0.1356956729, 0.0936467585, 0.0557877273, 0.0271598109, &
-                    0.0095151826, 0.0016381576 /
 
         X1 = 0.0; Y1 = 0.0; X2 = 0.0; Y2 = 0.0; X3 = 0.0; Y3 = 0.0
         A1 = 0.0; B1 = 0.0; A2 = 0.0; B2 = 0.0
@@ -343,7 +351,7 @@ contains
     !-------------------------------------------------------------------
     !> @brief Rearranges FI and DFI arrays to store boundary displacements
     !>        and tractions, then computes displacements and stresses at
-    !>        internal points.
+    !>        internal points in parallel using OpenMP.
     !-------------------------------------------------------------------
     subroutine INTEREQ()
         implicit none
@@ -379,6 +387,7 @@ contains
         ! Compute the values of stresses and displacements at internal points
         if (L == 0) return
 
+        !$omp parallel do default(shared) private(K, I, J, IJ4, HW, GW, D11, D12, D22, S11, S12, S22) schedule(dynamic)
         do K = 1, L
             SSOL(3*K-2) = 0.0
             SSOL(3*K-1) = 0.0
@@ -401,6 +410,7 @@ contains
                 end do
             end do
         end do
+        !$omp end parallel do
 
     end subroutine INTEREQ
 
@@ -413,17 +423,18 @@ contains
         real, intent(in)  :: XP, YP, X1, Y1, X2, Y2, X3, Y3
         real, intent(out) :: D11(6), D12(6), D22(6), S11(6), S12(6), S22(6)
 
-        real :: GI(10), OME(10)
+        real, parameter :: GI(10) = [ &
+            0.9739065285, -0.9739065285,  0.8650633666, -0.8650633666, &
+            0.6794095683, -0.6794095682,  0.4333953941, -0.4333953941, &
+            0.1488743389, -0.1488743389 ]
+        real, parameter :: OME(10) = [ &
+            0.0666713443, 0.0666713443,  0.1494513491, 0.1494513491, &
+            0.2190863625, 0.2190863625,  0.2692667193, 0.2692667193, &
+            0.2955242247, 0.2955242247 ]
+
         real :: FA, AL, A, B, C, D, DE
         real :: F1, F2, F3, XCO, YCO, XJA, ETA1, ETA2, RA, RD1, RD2, RDN
         integer :: I
-
-        data GI / 0.9739065285, -0.9739065285,  0.8650633666, -0.8650633666, &
-                  0.6794095683, -0.6794095682,  0.4333953941, -0.4333953941, &
-                  0.1488743389, -0.1488743389 /
-        data OME / 0.0666713443, 0.0666713443,  0.1494513491, 0.1494513491, &
-                   0.2190863625, 0.2190863625,  0.2692667193, 0.2692667193, &
-                   0.2955242247, 0.2955242247 /
 
         D11 = 0.0
         D12 = 0.0
