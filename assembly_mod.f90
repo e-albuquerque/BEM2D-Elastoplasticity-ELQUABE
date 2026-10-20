@@ -238,6 +238,9 @@ contains
                     0.0095151826, 0.0016381576 /
 
         X1 = 0.0; Y1 = 0.0; X2 = 0.0; Y2 = 0.0; X3 = 0.0; Y3 = 0.0
+        A1 = 0.0; B1 = 0.0; A2 = 0.0; B2 = 0.0
+        XJA1 = 0.0; XJA11 = 0.0; XJA2 = 0.0; XLO = 0.0
+        S1 = 0.0; S2 = 0.0; S3 = 0.0
 
         ! Set local coordinate system
         select case (NODO)

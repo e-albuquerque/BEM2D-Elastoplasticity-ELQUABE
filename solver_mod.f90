@@ -1,15 +1,25 @@
 !-----------------------------------------------------------------------
 ! MODULE: solver_mod
-!> @brief System of linear equations solver module.
+!> @brief System of linear equations solver module using LAPACK (DGESV).
 !-----------------------------------------------------------------------
 module solver_mod
     implicit none
 
+    ! Explicit interface for LAPACK's double-precision real linear solver
+    interface
+        subroutine DGESV(N, NRHS, A, LDA, IPIV, B, LDB, INFO)
+            implicit none
+            integer, intent(in)    :: N, NRHS, LDA, LDB
+            integer, intent(out)   :: IPIV(N), INFO
+            real,    intent(inout) :: A(LDA, *), B(LDB, *)
+        end subroutine DGESV
+    end interface
+
 contains
 
     !-------------------------------------------------------------------
-    !> @brief Solves the linear system A * X = B using Gaussian
-    !>        elimination with partial row pivoting (SLNPD).
+    !> @brief Solves the linear system A * X = B using LAPACK's DGESV
+    !>        (LU decomposition with partial pivoting and row interchanges).
     !-------------------------------------------------------------------
     subroutine SLNPD(A, B, D, N, NX, IPR)
         implicit none
@@ -17,84 +27,31 @@ contains
         real, intent(inout) :: A(NX, NX), B(NX)
         real, intent(out)   :: D
 
-        real :: TOL, C
-        integer :: I, J, K, K1, L, N1
-        logical :: pivoted
+        integer, allocatable :: IPIV(:)
+        integer :: INFO, I
 
-        TOL = 1.0e-6
-        N1  = N - 1
+        allocate(IPIV(N))
 
-        do K = 1, N1
-            K1 = K + 1
-            C  = A(K, K)
-            if (abs(C) <= TOL) then
-                pivoted = .false.
-                do J = K1, N
-                    ! Try to interchange rows to get non-zero diagonal coefficient
-                    if (abs(A(J, K)) > TOL) then
-                        do L = K, N
-                            C       = A(K, L)
-                            A(K, L) = A(J, L)
-                            A(J, L) = C
-                        end do
-                        C    = B(K)
-                        B(K) = B(J)
-                        B(J) = C
-                        C    = A(K, K)
-                        pivoted = .true.
-                        exit
-                    end if
-                end do
+        ! Solve A * X = B in-place via LAPACK DGESV
+        call DGESV(N, 1, A, NX, IPIV, B, NX, INFO)
 
-                if (.not. pivoted) then
-                    write(IPR, 2) K
-                    D = 0.0
-                    return
-                end if
-            end if
-
-            ! Divide row by diagonal coefficient
-            C = A(K, K)
-            do J = K1, N
-                A(K, J) = A(K, J) / C
-            end do
-            B(K) = B(K) / C
-
-            ! Eliminate unknown X(K) from row I
-            do I = K1, N
-                C = A(I, K)
-                do J = K1, N
-                    A(I, J) = A(I, J) - C * A(K, J)
-                end do
-                B(I) = B(I) - C * B(K)
-            end do
-        end do
-
-        ! Compute last unknown
-        if (abs(A(N, N)) <= TOL) then
-            write(IPR, 2) N
+        if (INFO /= 0) then
+            write(IPR, 2) INFO
             D = 0.0
+            deallocate(IPIV)
             return
         end if
-        B(N) = B(N) / A(N, N)
 
-        ! Apply backsubstitution process to compute remaining unknowns
-        do L = 1, N1
-            K  = N - L
-            K1 = K + 1
-            do J = K1, N
-                B(K) = B(K) - A(K, J) * B(J)
-            end do
-        end do
-
-        ! Compute value of determinant
+        ! Compute determinant from U diagonal factors and pivot parity
         D = 1.0
         do I = 1, N
+            if (IPIV(I) /= I) D = -D
             D = D * A(I, I)
         end do
 
+        deallocate(IPIV)
         return
-2       format(' **** SINGULARITY IN ROW', I5)
+2       format(' **** SINGULARITY OR LAPACK DGESV ERROR (INFO =', I5, ')')
     end subroutine SLNPD
 
 end module solver_mod
