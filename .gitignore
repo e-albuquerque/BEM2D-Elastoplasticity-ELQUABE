@@ -1,0 +1,6 @@
+*.o
+*.mod
+*.exe
+fort.*
+__pycache__/
+.ipynb_checkpoints/
