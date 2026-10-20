@@ -68,8 +68,8 @@ contains
     end subroutine INPUTEQ
 
     !-------------------------------------------------------------------
-    !> @brief Prints displacements and tractions at boundary nodes, and
-    !>        displacements and stresses at internal points.
+    !> @brief Prints displacements, tractions, and stresses at boundary
+    !>        nodes, and displacements and stresses at internal points.
     !-------------------------------------------------------------------
     subroutine OUTPTEQ()
         implicit none
@@ -90,18 +90,24 @@ contains
                2X, 'AFTER NODE', 3X, 'AFTER NODE'/)
         write(IPR, 250) X(1), Y(1), DFI(6*NE-1), DFI(6*NE), DFI(1), DFI(2)
         write(IPR, 250) X(2), Y(2), DFI(3), DFI(4), DFI(3), DFI(4)
-        write(IP3, *) (DFI(6*NE-1) + DFI(1)) / 2.0, (DFI(6*NE) + DFI(2)) / 2.0
-        write(IP3, *) DFI(3), DFI(4)
 
         do I = 2, NE
-            write(IP3, *) (DFI(6*I-7) + DFI(6*I-5)) / 2.0, (DFI(6*I-6) + DFI(6*I-4)) / 2.0
-            write(IP3, *) DFI(6*I-3), DFI(6*I-2)
             write(IPR, 250) X(2*I-1), Y(2*I-1), DFI(6*I-7), DFI(6*I-6), &
                             DFI(6*I-5), DFI(6*I-4)
             write(IPR, 250) X(2*I), Y(2*I), DFI(6*I-3), DFI(6*I-2), &
                             DFI(6*I-3), DFI(6*I-2)
         end do
 250     format(6(1X, E12.5))
+
+        ! Write boundary stresses [sigma_x, tau_xy, sigma_y, sigma_vm] to stbou.dat and eq12cb.out
+        write(IPR, 260)
+260     format(///2X, 'BOUNDARY NODES STRESSES'//8X, 'X', 15X, 'Y', 12X, &
+               'SIGMA X', 10X, 'TAU XY', 9X, 'SIGMA Y', 8X, 'VON MISES')
+        do I = 1, N
+            write(IP3, *) SBOU(I, 1), SBOU(I, 2), SBOU(I, 3), SBOU(I, 4)
+            write(IPR, 270) X(I), Y(I), SBOU(I, 1), SBOU(I, 2), SBOU(I, 3), SBOU(I, 4)
+        end do
+270     format(6(2X, E14.7))
 
         if (L > 0) then
             write(IPR, 300)
@@ -115,14 +121,14 @@ contains
 
             write(IPR, 350)
 350         format(//2X, 'INTERNAL POINTS STRESSES'//8X, 'X', 15X, 'Y', 12X, &
-                   'SIGMA X', 10X, 'TAU XY', 9X, 'SIGMA Y')
+                   'SIGMA X', 10X, 'TAU XY', 9X, 'SIGMA Y', 8X, 'VON MISES')
             do K = 1, L
-                write(IP4, *) SSOL(3*K-2), SSOL(3*K-1), SSOL(3*K)
-                write(IPR, 450) CX(K), CY(K), SSOL(3*K-2), SSOL(3*K-1), SSOL(3*K)
+                write(IP4, *) SSOL(3*K-2), SSOL(3*K-1), SSOL(3*K), SVM_INT(K)
+                write(IPR, 450) CX(K), CY(K), SSOL(3*K-2), SSOL(3*K-1), SSOL(3*K), SVM_INT(K)
             end do
         end if
 400     format(4(2X, E14.7))
-450     format(5(2X, E14.7))
+450     format(6(2X, E14.7))
 
         write(IPR, 500)
 500     format(' ', 79('*'))

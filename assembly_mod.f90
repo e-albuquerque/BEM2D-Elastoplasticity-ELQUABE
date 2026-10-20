@@ -1,8 +1,8 @@
 !-----------------------------------------------------------------------
 ! MODULE: assembly_mod
-!> @brief Boundary element integration and matrix assembly routines
-!>        (GHMATEQ, EXTINEQ, LOCINEQ, INTEREQ, SIGMAEQ) parallelized
-!>        with OpenMP.
+!> @brief Boundary element integration, matrix assembly, and stress
+!>        recovery routines (GHMATEQ, EXTINEQ, LOCINEQ, INTEREQ,
+!>        BOUND_STRESS, CALC_DFFORMA, SIGMAEQ) parallelized with OpenMP.
 !-----------------------------------------------------------------------
 module assembly_mod
     use data_mod
@@ -350,14 +350,15 @@ contains
 
     !-------------------------------------------------------------------
     !> @brief Rearranges FI and DFI arrays to store boundary displacements
-    !>        and tractions, then computes displacements and stresses at
+    !>        and tractions, computes boundary stresses via shape function
+    !>        derivatives, and evaluates displacements and stresses at
     !>        internal points in parallel using OpenMP.
     !-------------------------------------------------------------------
     subroutine INTEREQ()
         implicit none
         real :: HW(2, 6), GW(2, 6)
         real :: D11(6), D12(6), D22(6), S11(6), S12(6), S22(6)
-        real :: CH
+        real :: CH, SX, TXY, SY
         integer :: I, J, K, IJ4
 
         ! Rearrange FI and DFI arrays to store all values of displacement in FI
@@ -384,10 +385,13 @@ contains
             end do
         end do
 
+        ! Compute boundary nodal stresses using shape function derivatives
+        call BOUND_STRESS()
+
         ! Compute the values of stresses and displacements at internal points
         if (L == 0) return
 
-        !$omp parallel do default(shared) private(K, I, J, IJ4, HW, GW, D11, D12, D22, S11, S12, S22) schedule(dynamic)
+        !$omp parallel do default(shared) private(K, I, J, IJ4, HW, GW, D11, D12, D22, S11, S12, S22, SX, TXY, SY) schedule(dynamic)
         do K = 1, L
             SSOL(3*K-2) = 0.0
             SSOL(3*K-1) = 0.0
@@ -409,10 +413,148 @@ contains
                     DSOL(2*K)   = DSOL(2*K)   + GW(2, J) * DFI(6*I-6+J) - HW(2, J) * FI(IJ4)
                 end do
             end do
+
+            SX  = SSOL(3*K-2)
+            TXY = SSOL(3*K-1)
+            SY  = SSOL(3*K)
+            SVM_INT(K) = sqrt(SX**2 - SX * SY + SY**2 + 3.0 * TXY**2)
         end do
         !$omp end parallel do
 
     end subroutine INTEREQ
+
+    !-------------------------------------------------------------------
+    !> @brief Computes the derivatives of the quadratic continuous shape
+    !>        functions with respect to the intrinsic coordinate QSI.
+    !-------------------------------------------------------------------
+    subroutine CALC_DFFORMA(QSI, DN1DQSI, DN2DQSI, DN3DQSI)
+        implicit none
+        real, intent(in)  :: QSI
+        real, intent(out) :: DN1DQSI, DN2DQSI, DN3DQSI
+
+        DN1DQSI =  QSI - 0.5
+        DN2DQSI = -2.0 * QSI
+        DN3DQSI =  QSI + 0.5
+    end subroutine CALC_DFFORMA
+
+    !-------------------------------------------------------------------
+    !> @brief Computes the boundary stress tensor (sigma_x, tau_xy,
+    !>        sigma_y) and von Mises equivalent stress at each boundary
+    !>        node using shape function derivatives (Section 3.6 &
+    !>        calcula_tens_cont.m).
+    !-------------------------------------------------------------------
+    subroutine BOUND_STRESS()
+        implicit none
+        integer :: EL, NO, NO1, NO2, NO3, NO_GLOBAL, I
+        integer :: NODE_COUNT(N)
+        real :: X1, Y1, X2, Y2, X3, Y3
+        real :: QSI, DN1DQSI, DN2DQSI, DN3DQSI
+        real :: DXDQSI, DYDQSI, DGAMADQSI
+        real :: SX_TAN, SY_TAN, NX_VEC, NY_VEC
+        real :: LIJ(2, 2), LJI(2, 2), S_LOC(2, 2), SIGMA_GLOB(2, 2)
+        real :: TX, TY, S11, S12, S22, E22, DVDQSI
+        real :: UNO1(2), UNO2(2), UNO3(2), V1(2), V2(2), V3(2)
+        real :: E_MOD, SX, TXY, SY
+
+        SBOU       = 0.0
+        NODE_COUNT = 0
+        E_MOD      = 2.0 * GE * (1.0 + XNU)
+
+        do EL = 1, NE
+            ! Global node indices of the 3-node quadratic element
+            NO1 = 2 * EL - 1
+            NO2 = 2 * EL
+            if (EL == NE) then
+                NO3 = 1
+            else
+                NO3 = 2 * EL + 1
+            end if
+
+            ! Nodal coordinates
+            X1 = X(NO1); Y1 = Y(NO1)
+            X2 = X(NO2); Y2 = Y(NO2)
+            X3 = X(NO3); Y3 = Y(NO3)
+
+            ! Nodal displacements in global coordinates
+            UNO1(1) = FI(2*NO1 - 1); UNO1(2) = FI(2*NO1)
+            UNO2(1) = FI(2*NO2 - 1); UNO2(2) = FI(2*NO2)
+            UNO3(1) = FI(2*NO3 - 1); UNO3(2) = FI(2*NO3)
+
+            do NO = 1, 3
+                QSI = real(NO - 2)
+                call CALC_DFFORMA(QSI, DN1DQSI, DN2DQSI, DN3DQSI)
+
+                DXDQSI    = DN1DQSI * X1 + DN2DQSI * X2 + DN3DQSI * X3
+                DYDQSI    = DN1DQSI * Y1 + DN2DQSI * Y2 + DN3DQSI * Y3
+                DGAMADQSI = sqrt(DXDQSI**2 + DYDQSI**2)
+
+                ! Unit tangent vector (SX_TAN, SY_TAN) and outward normal (NX_VEC, NY_VEC)
+                SX_TAN = DXDQSI / DGAMADQSI
+                SY_TAN = DYDQSI / DGAMADQSI
+                NX_VEC =  SY_TAN
+                NY_VEC = -SX_TAN
+
+                ! Transformation matrix (global -> local normal-tangential)
+                LIJ(1, 1) =  NX_VEC; LIJ(1, 2) = NY_VEC
+                LIJ(2, 1) = -NY_VEC; LIJ(2, 2) = NX_VEC
+
+                ! Global node index for current local node
+                if (NO == 1) then
+                    NO_GLOBAL = NO1
+                else if (NO == 2) then
+                    NO_GLOBAL = NO2
+                else
+                    NO_GLOBAL = NO3
+                end if
+
+                ! Element traction at current local node in global coordinates
+                TX = DFI(6*EL - 6 + 2*NO - 1)
+                TY = DFI(6*EL - 6 + 2*NO)
+
+                ! Traction in local coordinates (s11 = normal stress, s12 = shear stress)
+                S11 = LIJ(1, 1) * TX + LIJ(1, 2) * TY
+                S12 = LIJ(2, 1) * TX + LIJ(2, 2) * TY
+
+                ! Nodal displacements in local coordinates
+                V1 = matmul(LIJ, UNO1)
+                V2 = matmul(LIJ, UNO2)
+                V3 = matmul(LIJ, UNO3)
+
+                ! Tangential displacement derivative and membrane stress s22
+                DVDQSI = DN1DQSI * V1(2) + DN2DQSI * V2(2) + DN3DQSI * V3(2)
+                E22    = DVDQSI / DGAMADQSI
+                S22    = (E_MOD * E22) / (1.0 - XNU**2) + (XNU * (1.0 + XNU) / (1.0 - XNU**2)) * S11
+
+                ! Transformation matrix (local -> global)
+                LJI(1, 1) = NX_VEC; LJI(1, 2) = -NY_VEC
+                LJI(2, 1) = NY_VEC; LJI(2, 2) =  NX_VEC
+
+                S_LOC(1, 1) = S11; S_LOC(1, 2) = S12
+                S_LOC(2, 1) = S12; S_LOC(2, 2) = S22
+
+                ! Global stress tensor sigma = LJI * S_LOC * LJI^T
+                SIGMA_GLOB = matmul(LJI, matmul(S_LOC, transpose(LJI)))
+
+                ! Accumulate nodal stress components [sigma_x, tau_xy, sigma_y]
+                SBOU(NO_GLOBAL, 1) = SBOU(NO_GLOBAL, 1) + SIGMA_GLOB(1, 1)
+                SBOU(NO_GLOBAL, 2) = SBOU(NO_GLOBAL, 2) + SIGMA_GLOB(1, 2)
+                SBOU(NO_GLOBAL, 3) = SBOU(NO_GLOBAL, 3) + SIGMA_GLOB(2, 2)
+                NODE_COUNT(NO_GLOBAL) = NODE_COUNT(NO_GLOBAL) + 1
+            end do
+        end do
+
+        ! Average at shared extreme nodes and compute von Mises equivalent stress
+        do I = 1, N
+            if (NODE_COUNT(I) > 0) then
+                SBOU(I, 1:3) = SBOU(I, 1:3) / real(NODE_COUNT(I))
+            end if
+            SX  = SBOU(I, 1)
+            TXY = SBOU(I, 2)
+            SY  = SBOU(I, 3)
+            SBOU(I, 4) = sqrt(SX**2 - SX * SY + SY**2 + 3.0 * TXY**2)
+        end do
+
+    end subroutine BOUND_STRESS
 
     !-------------------------------------------------------------------
     !> @brief Computes the S and D stress kernel matrices using Gauss
