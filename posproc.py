@@ -1,163 +1,244 @@
+import os
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.tri as mtri
+from matplotlib import cm
+import meshio
 
-def compute_analytical_solution(n, L, rho, E, nu):
+from preproc import input_data, compute_inodes
+
+
+def read_elquabe_input(filename='eq12cb.dat'):
     """
-    Computes the analytical resonance frequencies for the 1D P-wave propagation problem.
-
-    Args:
-        n (int or array-like): The mode number(s) (0, 1, 2, ...).
-        L (float): Length of the domain.
-        rho (float): Density of the material.
-        E (float): Elastic modulus.
-        nu (float): Poisson's ratio.
-
-    Returns:
-        omega (float or array-like): The analytical resonance frequency(ies) in s^-1.
+    Reads the ELQUABE input file (`eq12cb.dat`) and returns material properties,
+    boundary node coordinates, and internal point coordinates.
     """
-    # Constrained modulus for P-wave in 1D (plane strain assumption usually, but text uses c1)
-    # Assuming 1D bar velocity c1 = sqrt(E / rho) based on context, or constrained P-wave velocity.
-    # Let's use the constrained P-wave velocity c1 = sqrt((E * (1 - nu)) / (rho * (1 + nu) * (1 - 2*nu)))
-    # For a simple 1D rod, c = sqrt(E/rho). We'll use the constrained one which is more common in these plane problems.
-
-    M = E * (1 - nu) / ((1 + nu) * (1 - 2 * nu))
-    c1 = np.sqrt(M / rho)
-
-    omega = (2 * np.array(n) + 1) * np.pi * c1 / (2 * L)
-    return omega
-
-# Example usage to verify the first frequency:
-# Using parameters from the text: L=6, rho=100 (from text, though input_data has 7850), E needs to match mu=10^6
-# Let's recalculate based on text to see if it matches 45.345
-# mu = E / (2*(1+nu)) => E = mu * 2 * (1+nu) = 10^6 * 2 * 1.25 = 2.5 * 10^6
-# L = 6
-# rho = 100
-# nu = 0.25
-
-L_text = 6.0
-rho_text = 100.0
-nu_text = 0.25
-mu_text = 1.0e6
-E_text = mu_text * 2 * (1 + nu_text)
-
-w_n = compute_analytical_solution(np.array([0, 1, 2]), L_text, rho_text, E_text, nu_text)
-print(f"Analytical frequencies (n=0,1,2): {w_n}")
-
-import numpy as np
-import matplotlib.pyplot as plt
-
-# 1. Parâmetros do problema
-L_text = 6.0
-rho_text = 100.0
-nu_text = 0.25
-mu_text = 1.0e6
-E_text = mu_text * 2 * (1 + nu_text)
-p = 100.0  # Tração aplicada
-
-# Módulo de deformação confinada e velocidade da onda P
-M = E_text * (1 - nu_text) / ((1 + nu_text) * (1 - 2 * nu_text))
-c1 = np.sqrt(M / rho_text)
-
-# Frequência selecionada para comparação (combina com os dados numéricos)
-w_eval = 70.0
-
-# 2. Solução Analítica (Deslocamento 1D)
-def analytical_displacement(y, w, p, c1, M, L):
-    # u(y) = [p * c1 / (M * w * cos(w * L / c1))] * sin(w * y / c1)
-    return (p * c1 / (M * w * np.cos(w * L / c1))) * np.sin(w * y / c1)
-
-
-# Gerando pontos para a curva analítica
-y_analyt = np.linspace(0, L_text, 100)
-u_analyt = analytical_displacement(y_analyt, w_eval, p, c1, M, L_text)
-
-# 3. Dados Numéricos (Extraídos anteriormente de squa4.out para w=70)
-y_num = np.array([1., 2., 3., 4., 5.])
-u_num_real = np.array([-0.4265E-04, -0.7852E-04, -0.1018E-03, -0.1085E-03, -0.9723E-04])
-
-# 4. Plot da Comparação
-plt.figure(figsize=(10, 6))
-plt.plot(y_analyt, u_analyt * 1e4, 'r-', linewidth=2, \
-         label=f'Solução Analítica ($\\omega$ = {w_eval} rad/s)')
-plt.plot(y_num, u_num_real * 1e4, 'bs', markersize=8, \
-         label='Resultados Numéricos (QUADPLEH)')
-
-plt.xlabel('Posição $y$ (m)')
-plt.ylabel('Parte Real do Deslocamento Vertical $u_y \\times 10^4$ (m)')
-plt.title('Comparação: Solução Analítica vs Numérica ao longo do eixo central')
-plt.legend()
-plt.grid(True)
-plt.xlim(0, L_text)
-plt.savefig("result_plot.png")
-
-frequencies = np.linspace(10.,150.,30)
-
-# 1. Carrega os dados do arquivo disp.dat gerado pelo solver Fortran
-freq_num = []
-uy_num_mod = []
-
-try:
-    with open('disp_trac.dat', 'r') as f:
+    with open(filename, 'r') as f:
         lines = [line.strip() for line in f if line.strip()]
 
-        for i, line in enumerate(lines):
-            if i >= len(frequencies):
-                break
+    title = lines[0]
+    params = lines[1].replace(',', ' ').split()
+    ne = int(params[0])
+    n_int = int(params[1])
+    ge = float(params[2])
+    xnu = float(params[3])
 
-            parts = line.split()
-            if len(parts) < 2:
-                continue
+    n_bou = 2 * ne
+    bou_vals = [float(v) for v in lines[2].split()]
+    bou_coords = np.array(bou_vals, dtype=np.float64).reshape((n_bou, 2))
 
-            # A estrutura gerada é: (ux_re,ux_im) (uy_re,uy_im)
-            # O deslocamento 'y' é o segundo item (índice 1)
-            uy_str = parts[1].strip('()')
+    int_coords = np.zeros((n_int, 2), dtype=np.float64)
+    if n_int > 0:
+        int_vals = [float(v) for v in lines[3 + ne].split()]
+        int_coords = np.array(int_vals, dtype=np.float64).reshape((n_int, 2))
 
-            re_uy, im_uy = uy_str.split(',')
-            uy_mod = np.abs(complex(float(re_uy), float(im_uy)))
+    return {
+        'title': title,
+        'ne': ne,
+        'n_bou': n_bou,
+        'n_int': n_int,
+        'ge': ge,
+        'xnu': xnu,
+        'bou_coords': bou_coords,
+        'int_coords': int_coords,
+    }
 
-            freq_num.append(frequencies[i])
-            uy_num_mod.append(uy_mod)
 
-    freq_num = np.array(freq_num)
-    uy_num_mod = np.array(uy_num_mod)
-    print(f"Foram lidos {len(freq_num)} registros de disp_trac.dat.")
+def read_elquabe_outputs():
+    """
+    Reads numerical results exported by ELQUABE:
+      - `dpbou.dat`: Boundary displacements (ux, uy, |u|)
+      - `dpint.dat`: Internal displacements (ux, uy, |u|)
+      - `stbou.dat`: Boundary tractions (tx, ty)
+      - `stint.dat`: Internal stresses (sigma_x, tau_xy, sigma_y)
+    """
+    dpbou = np.loadtxt('dpbou.dat')
+    dpint = np.loadtxt('dpint.dat')
+    stbou = np.loadtxt('stbou.dat')
+    stint = np.loadtxt('stint.dat')
+    return {
+        'dpbou': dpbou,
+        'dpint': dpint,
+        'stbou': stbou,
+        'stint': stint,
+    }
 
-    # 2. Parâmetros analíticos
-    L_text = 6.0
-    rho_text = 100.0
-    nu_text = 0.25
-    mu_text = 1.0e6
-    E_text = mu_text * 2 * (1 + nu_text)
-    p = 100.0
 
-    M = E_text * (1 - nu_text) / ((1 + nu_text) * (1 - 2 * nu_text))
-    c1 = np.sqrt(M / rho_text)
-    w1 = np.pi * c1 / (2 * L_text) # 1ª Frequência natural
+def compute_analytical_solution(coords, ge, xnu, traction_y=1.0):
+    """
+    Computes the analytical 2D plane-strain elastostatic solution for a plate
+    fixed at y = 0 and subjected to uniform vertical traction sigma_y = traction_y
+    at the top edge:
+        E' = 2 * G / (1 - nu)
+        u_y(y) = (traction_y / E') * y
+        sigma_x = 0, tau_xy = 0, sigma_y = traction_y
+    """
+    e_plane_strain = 2.0 * ge / (1.0 - xnu)
+    y = coords[:, 1]
+    uy_exact = (traction_y / e_plane_strain) * y
+    sigma_y_exact = np.full_like(y, traction_y)
+    sigma_x_exact = np.zeros_like(y)
+    tau_xy_exact = np.zeros_like(y)
+    return {
+        'uy': uy_exact,
+        'sigma_x': sigma_x_exact,
+        'tau_xy': tau_xy_exact,
+        'sigma_y': sigma_y_exact,
+    }
 
-    # 3. Curva Analítica contínua para u(L)
-    w_analyt = np.linspace(0.1, np.max(freq_num) + 10, 1000)
-    u_analyt = (p * c1 / (M * w_analyt)) * np.tan(w_analyt * L_text / c1)
-    u_analyt_mod = np.abs(u_analyt)
 
-    # 4. Plot da Comparação
-    plt.figure(figsize=(10, 6))
-    plt.plot(w_analyt / w1, u_analyt_mod * 1e4, 'r-', label='Solução Analítica (Contínua)')
-    plt.plot(freq_num / w1, uy_num_mod * 1e4, 'bs', markersize=8, label='Resultados Numéricos (disp.dat)')
+def plot_validation(inp, out, save_path='result_plot.png'):
+    """
+    Compares numerical BEM displacements and stresses against the analytical
+    2D elastostatic solution and saves the plot to `result_plot.png`.
+    """
+    bou_coords = inp['bou_coords']
+    int_coords = inp['int_coords']
+    ge = inp['ge']
+    xnu = inp['xnu']
 
-    # Linha vertical para a primeira ressonância
-    plt.axvline(1.0, color='gray', linestyle='--', alpha=0.5, label='1ª Freq. Ressonância')
+    dpbou = out['dpbou']
+    dpint = out['dpint']
+    stint = out['stint']
 
-    plt.xlabel('Frequência Normalizada ($\\omega / \\omega_1$)')
-    plt.ylabel('Módulo do Deslocamento Vertical $|u_y| \\times 10^4$ (m)')
-    plt.title("Comparação FRF: Analítico vs Numérico (Extraído de disp.dat)")
+    y_cont = np.linspace(0.0, np.max(bou_coords[:, 1]), 100)
+    cont_coords = np.column_stack([np.full_like(y_cont, 0.5), y_cont])
+    exact_cont = compute_analytical_solution(cont_coords, ge, xnu, traction_y=1.0)
 
-    # Limitando o eixo y para focar nos resultados sem que as assíntotas estraguem a escala
-    if len(uy_num_mod) > 0:
-        plt.ylim(0, np.max(uy_num_mod * 1e4) + 2)
-    plt.xlim(0, np.max(w_analyt / w1))
-    plt.legend()
-    plt.grid(True)
-    plt.savefig("result_plot.png")
+    exact_bou = compute_analytical_solution(bou_coords, ge, xnu, traction_y=1.0)
+    exact_int = compute_analytical_solution(int_coords, ge, xnu, traction_y=1.0)
 
-except Exception as e:
-    print(f"Erro ao processar disp.dat: {e}")
+    # Compute relative L2 errors
+    all_uy_num = np.concatenate([dpbou[:, 1], dpint[:, 1]])
+    all_uy_ex = np.concatenate([exact_bou['uy'], exact_int['uy']])
+    err_uy = np.linalg.norm(all_uy_num - all_uy_ex) / np.linalg.norm(all_uy_ex)
+    err_sy = np.linalg.norm(stint[:, 2] - exact_int['sigma_y']) / np.linalg.norm(exact_int['sigma_y'])
+
+    print("=" * 72)
+    print("ELQUABE 2D ELASTOSTATIC VALIDATION SUMMARY")
+    print("=" * 72)
+    print(f"Relative L2 Error in Vertical Displacement u_y : {err_uy:.4e}")
+    print(f"Relative L2 Error in Vertical Stress sigma_y   : {err_sy:.4e}")
+    print("-" * 72)
+    print("Internal Points Comparison (y, u_y_num, u_y_exact, sigma_y_num, sigma_y_exact):")
+    for k in range(inp['n_int']):
+        print(
+            f"  Point {k+1} ({int_coords[k,0]:.2f}, {int_coords[k,1]:.2f}): "
+            f"u_y = {dpint[k,1]:.6f} (exact: {exact_int['uy'][k]:.6f}) | "
+            f"sigma_y = {stint[k,2]:.6f} (exact: {exact_int['sigma_y'][k]:.6f})"
+        )
+    print("=" * 72)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+
+    # Left subplot: Vertical displacement u_y vs y
+    ax1.plot(y_cont, exact_cont['uy'], 'r-', linewidth=2, label='Analytical Solution $u_y(y)$')
+    ax1.plot(bou_coords[:, 1], dpbou[:, 1], 'bo', markersize=7, label='BEM Boundary Nodes')
+    ax1.plot(int_coords[:, 1], dpint[:, 1], 'gs', markersize=7, label='BEM Internal Points')
+    ax1.set_xlabel('Vertical Coordinate $y$ (m)')
+    ax1.set_ylabel('Vertical Displacement $u_y$ (m)')
+    ax1.set_title('Vertical Displacement $u_y$ vs. $y$')
+    ax1.legend(loc='best')
+    ax1.grid(True, linestyle='--', alpha=0.5)
+
+    # Right subplot: Internal stresses vs y
+    ax2.plot(y_cont, exact_cont['sigma_y'], 'r-', linewidth=2, label='Analytical $\\sigma_y = 1.0$')
+    ax2.plot(y_cont, exact_cont['sigma_x'], 'k--', linewidth=1.5, label='Analytical $\\sigma_x = \\tau_{xy} = 0.0$')
+    ax2.plot(int_coords[:, 1], stint[:, 2], 'bs', markersize=7, label='BEM $\\sigma_y$')
+    ax2.plot(int_coords[:, 1], stint[:, 0], 'go', markersize=6, label='BEM $\\sigma_x$')
+    ax2.plot(int_coords[:, 1], stint[:, 1], 'm^', markersize=6, label='BEM $\\tau_{xy}$')
+    ax2.set_xlabel('Vertical Coordinate $y$ (m)')
+    ax2.set_ylabel('Stress Components (Pa)')
+    ax2.set_title('Internal Point Stresses vs. $y$')
+    ax2.set_ylim(-0.2, 1.2)
+    ax2.legend(loc='best')
+    ax2.grid(True, linestyle='--', alpha=0.5)
+
+    fig.suptitle('ELQUABE 2D Elastostatic Validation: Analytical vs. BEM', fontsize=13)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"Validation plot saved to '{save_path}'.")
+    plt.close(fig)
+
+
+def export_vtk_and_contour(out, vtk_path='resultado_elquabe.vtk', png_path='displacement_map.png'):
+    """
+    Maps the BEM boundary and internal displacements back onto the Gmsh quadratic
+    triangle mesh (`placa.msh`), exports a VTK file, and plots the 2D contour map.
+    """
+    inp_params = input_data()
+    computed_data = compute_inodes(inp_params['file_name'], inp_params['bound_cond'])
+
+    coord = computed_data['coordinates']
+    elements = computed_data['elements']
+    tri6 = computed_data['triangles']
+    int_nodes = computed_data['internal_nodes']
+
+    n_total = coord.shape[0]
+    disp_vec = np.zeros((n_total, 3), dtype=np.float64)
+    uy_field = np.zeros(n_total, dtype=np.float64)
+
+    # Map boundary node displacements in the same order written by preproc.py
+    dpbou = out['dpbou']
+    bou_idx = 0
+    for elem in elements:
+        for node_id in (elem[0], elem[2]):
+            disp_vec[node_id, 0] = dpbou[bou_idx, 0]
+            disp_vec[node_id, 1] = dpbou[bou_idx, 1]
+            uy_field[node_id] = dpbou[bou_idx, 1]
+            bou_idx += 1
+
+    # Map internal node displacements
+    dpint = out['dpint']
+    for k, node_id in enumerate(int_nodes):
+        disp_vec[node_id, 0] = dpint[k, 0]
+        disp_vec[node_id, 1] = dpint[k, 1]
+        uy_field[node_id] = dpint[k, 1]
+
+    # 1. Export VTK with quadratic triangle6 elements
+    cells = [('triangle6', tri6)]
+    mesh_out = meshio.Mesh(
+        coord,
+        cells,
+        point_data={
+            'Displacement_Y': uy_field,
+            'Displacement': disp_vec,
+        },
+    )
+    meshio.write(vtk_path, mesh_out)
+    print(f"VTK file '{vtk_path}' saved successfully.")
+
+    # 2. Subdivide each 6-node triangle into 4 linear triangles for Matplotlib contour plot
+    tri3_list = []
+    for t in tri6:
+        v0, v1, v2, v3, v4, v5 = t
+        tri3_list.append([v0, v3, v5])
+        tri3_list.append([v3, v1, v4])
+        tri3_list.append([v5, v4, v2])
+        tri3_list.append([v3, v4, v5])
+
+    tri3_array = np.array(tri3_list)
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    triang = mtri.Triangulation(coord[:, 0], coord[:, 1], tri3_array)
+
+    ax.triplot(triang, color=(0.0, 0.0, 0.0), linewidth=0.4)
+    contourf = ax.tricontourf(triang, uy_field, levels=20, cmap=cm.jet)
+    fig.colorbar(contourf, ax=ax, label='Vertical Displacement $u_y$ (m)')
+
+    ax.set_title('Vertical Displacement $u_y$ Contour (Quadratic Elements)')
+    ax.set_xlabel('$x$ (m)')
+    ax.set_ylabel('$y$ (m)')
+    ax.set_aspect('equal')
+
+    plt.savefig(png_path, dpi=300, bbox_inches='tight')
+    print(f"Contour map '{png_path}' saved successfully.")
+    plt.close(fig)
+
+
+if __name__ == '__main__':
+    inp = read_elquabe_input('eq12cb.dat')
+    out = read_elquabe_outputs()
+    plot_validation(inp, out, save_path='result_plot.png')
+    if os.path.exists('placa.msh') or os.path.exists('placa.geo'):
+        export_vtk_and_contour(out)
