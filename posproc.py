@@ -49,8 +49,8 @@ def read_elquabe_outputs():
     Reads numerical results exported by ELQUABE:
       - `dpbou.dat`: Boundary displacements (ux, uy, |u|)
       - `dpint.dat`: Internal displacements (ux, uy, |u|)
-      - `stbou.dat`: Boundary tractions (tx, ty)
-      - `stint.dat`: Internal stresses (sigma_x, tau_xy, sigma_y)
+      - `stbou.dat`: Boundary stresses (sigma_x, tau_xy, sigma_y, sigma_vm)
+      - `stint.dat`: Internal stresses (sigma_x, tau_xy, sigma_y, sigma_vm)
     """
     dpbou = np.loadtxt('dpbou.dat')
     dpint = np.loadtxt('dpint.dat')
@@ -71,7 +71,7 @@ def compute_analytical_solution(coords, ge, xnu, traction_y=1.0):
     at the top edge:
         E' = 2 * G / (1 - nu)
         u_y(y) = (traction_y / E') * y
-        sigma_x = 0, tau_xy = 0, sigma_y = traction_y
+        sigma_x = 0, tau_xy = 0, sigma_y = traction_y, sigma_vm = |traction_y|
     """
     e_plane_strain = 2.0 * ge / (1.0 - xnu)
     y = coords[:, 1]
@@ -79,18 +79,21 @@ def compute_analytical_solution(coords, ge, xnu, traction_y=1.0):
     sigma_y_exact = np.full_like(y, traction_y)
     sigma_x_exact = np.zeros_like(y)
     tau_xy_exact = np.zeros_like(y)
+    sigma_vm_exact = np.full_like(y, np.abs(traction_y))
     return {
         'uy': uy_exact,
         'sigma_x': sigma_x_exact,
         'tau_xy': tau_xy_exact,
         'sigma_y': sigma_y_exact,
+        'sigma_vm': sigma_vm_exact,
     }
 
 
 def plot_validation(inp, out, save_path='result_plot.png'):
     """
-    Compares numerical BEM displacements and stresses against the analytical
-    2D elastostatic solution and saves the plot to `result_plot.png`.
+    Compares numerical BEM displacements and stresses (including boundary stresses
+    and von Mises equivalent stress) against the analytical 2D elastostatic solution
+    and saves the plot to `result_plot.png`.
     """
     bou_coords = inp['bou_coords']
     int_coords = inp['int_coords']
@@ -99,6 +102,7 @@ def plot_validation(inp, out, save_path='result_plot.png'):
 
     dpbou = out['dpbou']
     dpint = out['dpint']
+    stbou = out['stbou']
     stint = out['stint']
 
     y_cont = np.linspace(0.0, np.max(bou_coords[:, 1]), 100)
@@ -108,26 +112,37 @@ def plot_validation(inp, out, save_path='result_plot.png'):
     exact_bou = compute_analytical_solution(bou_coords, ge, xnu, traction_y=1.0)
     exact_int = compute_analytical_solution(int_coords, ge, xnu, traction_y=1.0)
 
-    # Compute relative L2 errors
+    # Compute relative L2 errors across all nodes (boundary + internal)
     all_uy_num = np.concatenate([dpbou[:, 1], dpint[:, 1]])
     all_uy_ex = np.concatenate([exact_bou['uy'], exact_int['uy']])
     err_uy = np.linalg.norm(all_uy_num - all_uy_ex) / np.linalg.norm(all_uy_ex)
-    err_sy = np.linalg.norm(stint[:, 2] - exact_int['sigma_y']) / np.linalg.norm(exact_int['sigma_y'])
 
-    print("=" * 72)
+    all_vm_num = np.concatenate([stbou[:, 3], stint[:, 3]])
+    all_vm_ex = np.concatenate([exact_bou['sigma_vm'], exact_int['sigma_vm']])
+    err_vm = np.linalg.norm(all_vm_num - all_vm_ex) / np.linalg.norm(all_vm_ex)
+
+    print("=" * 78)
     print("ELQUABE 2D ELASTOSTATIC VALIDATION SUMMARY")
-    print("=" * 72)
-    print(f"Relative L2 Error in Vertical Displacement u_y : {err_uy:.4e}")
-    print(f"Relative L2 Error in Vertical Stress sigma_y   : {err_sy:.4e}")
-    print("-" * 72)
-    print("Internal Points Comparison (y, u_y_num, u_y_exact, sigma_y_num, sigma_y_exact):")
+    print("=" * 78)
+    print(f"Relative L2 Error in Vertical Displacement u_y      : {err_uy:.4e}")
+    print(f"Relative L2 Error in von Mises Stress (All Nodes)   : {err_vm:.4e}")
+    print("-" * 78)
+    print("Boundary Nodes von Mises Stress (x, y, sigma_x, tau_xy, sigma_y, sigma_vM):")
+    for i in range(inp['n_bou']):
+        print(
+            f"  Node {i+1} ({bou_coords[i,0]:.2f}, {bou_coords[i,1]:.2f}): "
+            f"sx={stbou[i,0]: .2e}, txy={stbou[i,1]: .2e}, "
+            f"sy={stbou[i,2]:.6f}, vM={stbou[i,3]:.6f}"
+        )
+    print("-" * 78)
+    print("Internal Points von Mises Stress (x, y, sigma_x, tau_xy, sigma_y, sigma_vM):")
     for k in range(inp['n_int']):
         print(
             f"  Point {k+1} ({int_coords[k,0]:.2f}, {int_coords[k,1]:.2f}): "
-            f"u_y = {dpint[k,1]:.6f} (exact: {exact_int['uy'][k]:.6f}) | "
-            f"sigma_y = {stint[k,2]:.6f} (exact: {exact_int['sigma_y'][k]:.6f})"
+            f"sx={stint[k,0]: .2e}, txy={stint[k,1]: .2e}, "
+            f"sy={stint[k,2]:.6f}, vM={stint[k,3]:.6f}"
         )
-    print("=" * 72)
+    print("=" * 78)
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
 
@@ -141,17 +156,18 @@ def plot_validation(inp, out, save_path='result_plot.png'):
     ax1.legend(loc='best')
     ax1.grid(True, linestyle='--', alpha=0.5)
 
-    # Right subplot: Internal stresses vs y
-    ax2.plot(y_cont, exact_cont['sigma_y'], 'r-', linewidth=2, label='Analytical $\\sigma_y = 1.0$')
+    # Right subplot: Boundary & internal stresses (including von Mises) vs y
+    ax2.plot(y_cont, exact_cont['sigma_vm'], 'r-', linewidth=2, label='Analytical $\\sigma_{\\mathrm{vM}} = \\sigma_y = 1.0$')
     ax2.plot(y_cont, exact_cont['sigma_x'], 'k--', linewidth=1.5, label='Analytical $\\sigma_x = \\tau_{xy} = 0.0$')
-    ax2.plot(int_coords[:, 1], stint[:, 2], 'bs', markersize=7, label='BEM $\\sigma_y$')
-    ax2.plot(int_coords[:, 1], stint[:, 0], 'go', markersize=6, label='BEM $\\sigma_x$')
-    ax2.plot(int_coords[:, 1], stint[:, 1], 'm^', markersize=6, label='BEM $\\tau_{xy}$')
+    ax2.plot(bou_coords[:, 1], stbou[:, 3], 'bo', markersize=7, label='BEM Boundary $\\sigma_{\\mathrm{vM}}$')
+    ax2.plot(int_coords[:, 1], stint[:, 3], 'gs', markersize=7, label='BEM Internal $\\sigma_{\\mathrm{vM}}$')
+    ax2.plot(int_coords[:, 1], stint[:, 0], 'c^', markersize=6, label='BEM Internal $\\sigma_x$')
+    ax2.plot(int_coords[:, 1], stint[:, 1], 'mv', markersize=6, label='BEM Internal $\\tau_{xy}$')
     ax2.set_xlabel('Vertical Coordinate $y$ (m)')
-    ax2.set_ylabel('Stress Components (Pa)')
-    ax2.set_title('Internal Point Stresses vs. $y$')
+    ax2.set_ylabel('Stress (Pa)')
+    ax2.set_title('Boundary & Internal Stresses vs. $y$')
     ax2.set_ylim(-0.2, 1.2)
-    ax2.legend(loc='best')
+    ax2.legend(loc='best', fontsize=8.5)
     ax2.grid(True, linestyle='--', alpha=0.5)
 
     fig.suptitle('ELQUABE 2D Elastostatic Validation: Analytical vs. BEM', fontsize=13)
@@ -161,10 +177,17 @@ def plot_validation(inp, out, save_path='result_plot.png'):
     plt.close(fig)
 
 
-def export_vtk_and_contour(out, vtk_path='resultado_elquabe.vtk', png_path='displacement_map.png'):
+def export_vtk_and_contours(
+    out,
+    vtk_path='resultado_elquabe.vtk',
+    disp_png_path='displacement_map.png',
+    vm_png_path='von_mises_map.png',
+):
     """
-    Maps the BEM boundary and internal displacements back onto the Gmsh quadratic
-    triangle mesh (`placa.msh`), exports a VTK file, and plots the 2D contour map.
+    Maps the BEM boundary and internal displacements and stresses (including
+    von Mises equivalent stress from column 4 of `stbou.dat` and `stint.dat`)
+    onto the Gmsh quadratic triangle mesh (`placa.msh`), exports a VTK file,
+    and plots the 2D mesh contour maps for displacement and von Mises stress.
     """
     inp_params = input_data()
     computed_data = compute_inodes(inp_params['file_name'], inp_params['bound_cond'])
@@ -177,23 +200,39 @@ def export_vtk_and_contour(out, vtk_path='resultado_elquabe.vtk', png_path='disp
     n_total = coord.shape[0]
     disp_vec = np.zeros((n_total, 3), dtype=np.float64)
     uy_field = np.zeros(n_total, dtype=np.float64)
+    sx_field = np.zeros(n_total, dtype=np.float64)
+    txy_field = np.zeros(n_total, dtype=np.float64)
+    sy_field = np.zeros(n_total, dtype=np.float64)
+    vm_field = np.zeros(n_total, dtype=np.float64)
 
-    # Map boundary node displacements in the same order written by preproc.py
+    # Map boundary node displacements (dpbou.dat) and stresses (stbou.dat)
     dpbou = out['dpbou']
+    stbou = out['stbou']
     bou_idx = 0
     for elem in elements:
         for node_id in (elem[0], elem[2]):
             disp_vec[node_id, 0] = dpbou[bou_idx, 0]
             disp_vec[node_id, 1] = dpbou[bou_idx, 1]
             uy_field[node_id] = dpbou[bou_idx, 1]
+
+            sx_field[node_id] = stbou[bou_idx, 0]
+            txy_field[node_id] = stbou[bou_idx, 1]
+            sy_field[node_id] = stbou[bou_idx, 2]
+            vm_field[node_id] = stbou[bou_idx, 3]
             bou_idx += 1
 
-    # Map internal node displacements
+    # Map internal node displacements (dpint.dat) and stresses (stint.dat)
     dpint = out['dpint']
+    stint = out['stint']
     for k, node_id in enumerate(int_nodes):
         disp_vec[node_id, 0] = dpint[k, 0]
         disp_vec[node_id, 1] = dpint[k, 1]
         uy_field[node_id] = dpint[k, 1]
+
+        sx_field[node_id] = stint[k, 0]
+        txy_field[node_id] = stint[k, 1]
+        sy_field[node_id] = stint[k, 2]
+        vm_field[node_id] = stint[k, 3]
 
     # 1. Export VTK with quadratic triangle6 elements
     cells = [('triangle6', tri6)]
@@ -201,14 +240,18 @@ def export_vtk_and_contour(out, vtk_path='resultado_elquabe.vtk', png_path='disp
         coord,
         cells,
         point_data={
-            'Displacement_Y': uy_field,
             'Displacement': disp_vec,
+            'Displacement_Y': uy_field,
+            'Sigma_X': sx_field,
+            'Tau_XY': txy_field,
+            'Sigma_Y': sy_field,
+            'Von_Mises_Stress': vm_field,
         },
     )
     meshio.write(vtk_path, mesh_out)
     print(f"VTK file '{vtk_path}' saved successfully.")
 
-    # 2. Subdivide each 6-node triangle into 4 linear triangles for Matplotlib contour plot
+    # 2. Subdivide each 6-node triangle into 4 linear triangles for Matplotlib contour plots
     tri3_list = []
     for t in tri6:
         v0, v1, v2, v3, v4, v5 = t
@@ -218,22 +261,34 @@ def export_vtk_and_contour(out, vtk_path='resultado_elquabe.vtk', png_path='disp
         tri3_list.append([v3, v4, v5])
 
     tri3_array = np.array(tri3_list)
-
-    fig, ax = plt.subplots(figsize=(6, 5))
     triang = mtri.Triangulation(coord[:, 0], coord[:, 1], tri3_array)
 
-    ax.triplot(triang, color=(0.0, 0.0, 0.0), linewidth=0.4)
-    contourf = ax.tricontourf(triang, uy_field, levels=20, cmap=cm.jet)
-    fig.colorbar(contourf, ax=ax, label='Vertical Displacement $u_y$ (m)')
+    # 2a. Plot Vertical Displacement Contour Map
+    fig1, ax1 = plt.subplots(figsize=(6, 5))
+    ax1.triplot(triang, color=(0.0, 0.0, 0.0), linewidth=0.4)
+    cf1 = ax1.tricontourf(triang, uy_field, levels=20, cmap=cm.jet)
+    fig1.colorbar(cf1, ax=ax1, label='Vertical Displacement $u_y$ (m)')
+    ax1.set_title('Vertical Displacement $u_y$ (Quadratic Elements)')
+    ax1.set_xlabel('$x$ (m)')
+    ax1.set_ylabel('$y$ (m)')
+    ax1.set_aspect('equal')
+    plt.savefig(disp_png_path, dpi=300, bbox_inches='tight')
+    print(f"Displacement contour map '{disp_png_path}' saved successfully.")
+    plt.close(fig1)
 
-    ax.set_title('Vertical Displacement $u_y$ Contour (Quadratic Elements)')
-    ax.set_xlabel('$x$ (m)')
-    ax.set_ylabel('$y$ (m)')
-    ax.set_aspect('equal')
-
-    plt.savefig(png_path, dpi=300, bbox_inches='tight')
-    print(f"Contour map '{png_path}' saved successfully.")
-    plt.close(fig)
+    # 2b. Plot von Mises Equivalent Stress Contour Map with Mesh Overlay
+    fig2, ax2 = plt.subplots(figsize=(6, 5))
+    cf2 = ax2.tricontourf(triang, vm_field, levels=20, cmap=cm.jet)
+    ax2.triplot(triang, color=(0.0, 0.0, 0.0), linewidth=0.5)
+    ax2.plot(coord[:, 0], coord[:, 1], 'ko', markersize=3.5)
+    fig2.colorbar(cf2, ax=ax2, label='von Mises Stress $\\sigma_{\\mathrm{vM}}$ (Pa)')
+    ax2.set_title('von Mises Equivalent Stress $\\sigma_{\\mathrm{vM}}$ (Quadratic Elements)')
+    ax2.set_xlabel('$x$ (m)')
+    ax2.set_ylabel('$y$ (m)')
+    ax2.set_aspect('equal')
+    plt.savefig(vm_png_path, dpi=300, bbox_inches='tight')
+    print(f"von Mises contour map '{vm_png_path}' saved successfully.")
+    plt.close(fig2)
 
 
 if __name__ == '__main__':
@@ -241,4 +296,4 @@ if __name__ == '__main__':
     out = read_elquabe_outputs()
     plot_validation(inp, out, save_path='result_plot.png')
     if os.path.exists('placa.msh') or os.path.exists('placa.geo'):
-        export_vtk_and_contour(out)
+        export_vtk_and_contours(out)

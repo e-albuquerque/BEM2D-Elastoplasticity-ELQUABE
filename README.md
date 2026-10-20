@@ -21,13 +21,13 @@ The original Fortran 77 codebase has been fully refactored to meet modern high-p
 ### Fortran Source Code
 - `main.f90`: Main program entry point.
 - `data_mod.f90`: Global variable declarations and dynamic array allocations.
-- `assembly_mod.f90`: BEM influence matrices integration and assembly (`GHMATEQ`, `EXTINEQ`, `LOCINEQ`, `INTEREQ`, `SIGMAEQ`).
+- `assembly_mod.f90`: BEM influence matrices integration, assembly, and boundary/internal stress recovery (`GHMATEQ`, `EXTINEQ`, `LOCINEQ`, `INTEREQ`, `BOUND_STRESS`, `CALC_DFFORMA`, `SIGMAEQ`).
 - `io_mod.f90`: Input/Output routines (`INPUTEQ`, `OUTPTEQ`).
 - `solver_mod.f90`: System of equations solver wrapper for LAPACK (`DGESV`).
 
 ### Python Tools & Validation
 - `preproc.py`: Reads Gmsh files (`.msh` via `meshio`), displays the geometry, and exports the simulation input data format (`eq12cb.dat`).
-- `posproc.py`: Post-processing script that reads the exported boundary/internal displacements and stresses (`dpbou.dat`, `dpint.dat`, `stbou.dat`, `stint.dat`) and compares the numerical BEM solution against analytical plane elasticity solutions.
+- `posproc.py`: Post-processing script that reads the exported boundary/internal displacements and stresses (`dpbou.dat`, `dpint.dat`, `stbou.dat`, `stint.dat`), validates the numerical BEM solution against analytical plane elasticity solutions, exports VTK data (`resultado_elquabe.vtk`), and plots 2D domain contour maps of displacement (`displacement_map.png`) and von Mises equivalent stress (`von_mises_map.png`).
 - `Run_elquabe_on_Colab.ipynb`: Google Colab notebook for running the preprocessing, compiling the BEM code, and executing the analytical validation entirely in the cloud.
 
 ### Build Scripts
