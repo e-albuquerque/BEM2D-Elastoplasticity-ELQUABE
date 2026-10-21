@@ -478,7 +478,10 @@ contains
             end do
         end do
 
-        !$omp parallel do default(shared) private(K, EL, NO1, NO2, NO3, NODE_LOC, NO_GLOB, DIR, J, COL_G, COL_H, HW, GW, D11, D12, D22, S11, S12, S22, SX, TXY, SY) schedule(dynamic)
+        !$omp parallel do default(shared) &
+        !$omp private(K, EL, NO1, NO2, NO3, NODE_LOC, NO_GLOB, DIR, J, COL_G, COL_H, &
+        !$omp         HW, GW, D11, D12, D22, S11, S12, S22, SX, TXY, SY) &
+        !$omp schedule(dynamic)
         do K = 1, L
             SSOL(3*K-2) = 0.0
             SSOL(3*K-1) = 0.0
@@ -491,9 +494,11 @@ contains
                 NO3 = CONEC(EL, 3)
 
                 call EXTINEQ(CX(K), CY(K), X(NO1), Y(NO1), X(NO2), Y(NO2), &
-                             X(NO3), Y(NO3), SF_G, XJA_EL(EL, :), ETA1_EL(EL, :), ETA2_EL(EL, :), HW, GW)
+                             X(NO3), Y(NO3), SF_G, XJA_EL(EL, :), ETA1_EL(EL, :), &
+                             ETA2_EL(EL, :), HW, GW)
                 call SIGMAEQ(CX(K), CY(K), X(NO1), Y(NO1), X(NO2), Y(NO2), &
-                             X(NO3), Y(NO3), SF_G, XJA_EL(EL, :), ETA1_EL(EL, :), ETA2_EL(EL, :), D11, D12, D22, S11, S12, S22)
+                             X(NO3), Y(NO3), SF_G, XJA_EL(EL, :), ETA1_EL(EL, :), &
+                             ETA2_EL(EL, :), D11, D12, D22, S11, S12, S22)
 
                 do NODE_LOC = 1, 3
                     NO_GLOB = CONEC(EL, NODE_LOC)
