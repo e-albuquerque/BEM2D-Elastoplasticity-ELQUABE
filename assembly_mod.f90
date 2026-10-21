@@ -2,7 +2,8 @@
 ! MODULE: assembly_mod
 !> @brief Boundary element integration, matrix assembly, and stress
 !>        recovery routines (GHMATEQ, EXTINEQ, LOCINEQ, INTEREQ,
-!>        BOUND_STRESS, CALC_DFFORMA, SIGMAEQ) parallelized with OpenMP.
+!>        BOUND_STRESS, CALC_DFFORMA, SIGMAEQ) using element connectivity
+!>        CONEC and parallelized with OpenMP.
 !-----------------------------------------------------------------------
 module assembly_mod
     use data_mod
@@ -12,44 +13,60 @@ contains
 
     !-------------------------------------------------------------------
     !> @brief Computes the G and H matrices in parallel using OpenMP
-    !>        and forms the linear system A * X = F (where A is stored
-    !>        in H and F is stored in FI).
+    !>        and element connectivity CONEC, then forms the linear
+    !>        system A * X = F (where A is stored in H and F in FI).
     !-------------------------------------------------------------------
     subroutine GHMATEQ()
         implicit none
         real :: HW(2, 6), GW(2, 6), CH
-        integer :: I, J, K, LL, NODO
+        integer :: EL, I, J, K, LL, NODO
+        integer :: NO1, NO2, NO3, NODE_LOC, DIR, NO_GLOB, COL_H, COL_G
+        integer :: FIRST_G_DOF(NN)
 
         H  = 0.0
         G  = 0.0
         FI = 0.0
 
-        X(N + 1) = X(1)
-        Y(N + 1) = Y(1)
-
         ! Compute the GW and HW matrices for each collocation point
         ! and each boundary element in parallel across CPU threads
-        !$omp parallel do default(shared) private(LL, I, K, J, NODO, HW, GW) schedule(dynamic)
+        !$omp parallel do default(shared) private(LL, EL, NO1, NO2, NO3, NODO, HW, GW, K, NODE_LOC, NO_GLOB, DIR, J, COL_H, COL_G) schedule(dynamic)
         do LL = 1, N
-            do I = 1, N - 1, 2
-                if ((LL - I) * (LL - I - 1) * (LL - I - 2) * (LL - I + N - 2) == 0) then
-                    NODO = LL - I + 1
-                    if ((LL == 1) .and. (I == N - 1)) NODO = NODO + N
-                    call EXTINEQ(X(LL), Y(LL), X(I), Y(I), X(I+1), Y(I+1), X(I+2), Y(I+2), HW, GW)
-                    call LOCINEQ(X(I), Y(I), X(I+1), Y(I+1), X(I+2), Y(I+2), GW, NODO)
+            do EL = 1, NE
+                NO1 = CONEC(EL, 1)
+                NO2 = CONEC(EL, 2)
+                NO3 = CONEC(EL, 3)
+
+                ! Check if collocation node LL belongs to element EL
+                if (LL == NO1) then
+                    NODO = 1
+                else if (LL == NO2) then
+                    NODO = 2
+                else if (LL == NO3) then
+                    NODO = 3
                 else
-                    call EXTINEQ(X(LL), Y(LL), X(I), Y(I), X(I+1), Y(I+1), X(I+2), Y(I+2), HW, GW)
+                    NODO = 0
+                end if
+
+                if (NODO > 0) then
+                    call EXTINEQ(X(LL), Y(LL), X(NO1), Y(NO1), X(NO2), Y(NO2), X(NO3), Y(NO3), HW, GW)
+                    call LOCINEQ(X(NO1), Y(NO1), X(NO2), Y(NO2), X(NO3), Y(NO3), GW, NODO)
+                else
+                    call EXTINEQ(X(LL), Y(LL), X(NO1), Y(NO1), X(NO2), Y(NO2), X(NO3), Y(NO3), HW, GW)
                 end if
 
                 ! Plug the GW and HW matrices into the general G and H matrices
+                ! using element connectivity CONEC(EL, 1:3)
                 do K = 1, 2
-                    do J = 1, 6
-                        G(2*LL-2+K, 3*I-3+J) = G(2*LL-2+K, 3*I-3+J) + GW(K, J)
-                        if (I == N - 1 .and. J >= 5) then
-                            H(2*LL-2+K, J-4) = H(2*LL-2+K, J-4) + HW(K, J)
-                        else
-                            H(2*LL-2+K, 2*I-2+J) = H(2*LL-2+K, 2*I-2+J) + HW(K, J)
-                        end if
+                    do NODE_LOC = 1, 3
+                        NO_GLOB = CONEC(EL, NODE_LOC)
+                        do DIR = 1, 2
+                            J     = 2 * NODE_LOC - 2 + DIR
+                            COL_G = 6 * EL - 6 + J
+                            COL_H = 2 * NO_GLOB - 2 + DIR
+
+                            G(2*LL-2+K, COL_G) = G(2*LL-2+K, COL_G) + GW(K, J)
+                            H(2*LL-2+K, COL_H) = H(2*LL-2+K, COL_H) + HW(K, J)
+                        end do
                     end do
                 end do
             end do
@@ -79,36 +96,37 @@ contains
         end do
 
         ! Reorder the columns of the system of equations in accordance
-        ! with the boundary conditions and form system matrix A stored in H
-        do I = 1, NE
-            do J = 1, 6
-                if (KODE(6*I-6+J) <= 0) then
-                    if ((I == NE) .and. (J >= 5)) then
-                        if (KODE(J-4) > 0) then
+        ! with the boundary conditions and connectivity CONEC to form
+        ! system matrix A stored in H
+        FIRST_G_DOF = 0
+        do EL = 1, NE
+            do NODE_LOC = 1, 3
+                NO_GLOB = CONEC(EL, NODE_LOC)
+                do DIR = 1, 2
+                    J     = 2 * NODE_LOC - 2 + DIR
+                    COL_G = 6 * EL - 6 + J
+                    COL_H = 2 * NO_GLOB - 2 + DIR
+
+                    if (KODE(COL_G) <= 0) then
+                        if (FIRST_G_DOF(COL_H) == 0) then
+                            ! First element prescribing displacement at this global DOF:
+                            ! swap column COL_H of H with column COL_G of -G * GE
+                            FIRST_G_DOF(COL_H) = COL_G
                             do K = 1, NN
-                                CH = H(K, J-4)
-                                H(K, J-4) = -G(K, 6*I-6+J) * GE
-                                G(K, 6*I-6+J) = -CH
+                                CH = H(K, COL_H)
+                                H(K, COL_H) = -G(K, COL_G) * GE
+                                G(K, COL_G) = -CH
                             end do
                         else
+                            ! Second element also prescribing displacement at this shared node:
+                            ! unknown traction is continuous across the node
                             do K = 1, NN
-                                H(K, J-4) = H(K, J-4) - G(K, 6*I-6+J) * GE
-                                G(K, 6*I-6+J) = 0.0
+                                H(K, COL_H) = H(K, COL_H) - G(K, COL_G) * GE
+                                G(K, COL_G) = 0.0
                             end do
                         end if
-                    else if (I == 1 .or. J > 2 .or. KODE(6*I-8+J) == 1) then
-                        do K = 1, NN
-                            CH = H(K, 4*I-4+J)
-                            H(K, 4*I-4+J) = -G(K, 6*I-6+J) * GE
-                            G(K, 6*I-6+J) = -CH
-                        end do
-                    else
-                        do K = 1, NN
-                            H(K, 4*I-4+J) = H(K, 4*I-4+J) - G(K, 6*I-6+J) * GE
-                            G(K, 6*I-6+J) = 0.0
-                        end do
                     end if
-                end if
+                end do
             end do
         end do
 
@@ -349,68 +367,81 @@ contains
     end subroutine LOCINEQ
 
     !-------------------------------------------------------------------
-    !> @brief Rearranges FI and DFI arrays to store boundary displacements
-    !>        and tractions, computes boundary stresses via shape function
-    !>        derivatives, and evaluates displacements and stresses at
-    !>        internal points in parallel using OpenMP.
+    !> @brief Rearranges FI and DFI arrays using CONEC to store boundary
+    !>        displacements and tractions, computes boundary stresses via
+    !>        shape function derivatives, and evaluates displacements and
+    !>        stresses at internal points in parallel using OpenMP.
     !-------------------------------------------------------------------
     subroutine INTEREQ()
         implicit none
         real :: HW(2, 6), GW(2, 6)
         real :: D11(6), D12(6), D22(6), S11(6), S12(6), S22(6)
         real :: CH, SX, TXY, SY
-        integer :: I, J, K, IJ4
+        integer :: EL, J, K
+        integer :: NO1, NO2, NO3, NODE_LOC, DIR, NO_GLOB, COL_H, COL_G
+        integer :: FIRST_G_DOF(NN)
 
-        ! Rearrange FI and DFI arrays to store all values of displacement in FI
-        ! and all values of traction in DFI
-        do I = 1, NE
-            do J = 1, 6
-                if (KODE(6*I-6+J) <= 0) then
-                    if ((I == NE) .and. (J >= 5)) then
-                        if (KODE(J-4) > 0) then
-                            CH = FI(J-4) * GE
-                            FI(J-4) = DFI(6*I-6+J)
-                            DFI(6*I-6+J) = CH
+        ! Rearrange FI and DFI arrays using element connectivity CONEC
+        ! so FI stores all boundary displacements and DFI stores all tractions
+        FIRST_G_DOF = 0
+        do EL = 1, NE
+            do NODE_LOC = 1, 3
+                NO_GLOB = CONEC(EL, NODE_LOC)
+                do DIR = 1, 2
+                    J     = 2 * NODE_LOC - 2 + DIR
+                    COL_G = 6 * EL - 6 + J
+                    COL_H = 2 * NO_GLOB - 2 + DIR
+
+                    if (KODE(COL_G) <= 0) then
+                        if (FIRST_G_DOF(COL_H) == 0) then
+                            FIRST_G_DOF(COL_H) = COL_G
+                            CH         = FI(COL_H) * GE
+                            FI(COL_H)  = DFI(COL_G)
+                            DFI(COL_G) = CH
                         else
-                            DFI(6*I-6+J) = DFI(J-4)
+                            DFI(COL_G) = DFI(FIRST_G_DOF(COL_H))
                         end if
-                    else if (I == 1 .or. J > 2 .or. KODE(6*I-8+J) == 1) then
-                        CH = FI(4*I-4+J) * GE
-                        FI(4*I-4+J) = DFI(6*I-6+J)
-                        DFI(6*I-6+J) = CH
-                    else
-                        DFI(6*I-6+J) = DFI(6*I-8+J)
                     end if
-                end if
+                end do
             end do
         end do
 
-        ! Compute boundary nodal stresses using shape function derivatives
+        ! Compute boundary nodal stresses using shape function derivatives and CONEC
         call BOUND_STRESS()
 
         ! Compute the values of stresses and displacements at internal points
         if (L == 0) return
 
-        !$omp parallel do default(shared) private(K, I, J, IJ4, HW, GW, D11, D12, D22, S11, S12, S22, SX, TXY, SY) schedule(dynamic)
+        !$omp parallel do default(shared) private(K, EL, NO1, NO2, NO3, NODE_LOC, NO_GLOB, DIR, J, COL_G, COL_H, HW, GW, D11, D12, D22, S11, S12, S22, SX, TXY, SY) schedule(dynamic)
         do K = 1, L
             SSOL(3*K-2) = 0.0
             SSOL(3*K-1) = 0.0
             SSOL(3*K)   = 0.0
             DSOL(2*K-1) = 0.0
             DSOL(2*K)   = 0.0
-            do I = 1, NE
-                call EXTINEQ(CX(K), CY(K), X(2*I-1), Y(2*I-1), X(2*I), Y(2*I), &
-                             X(2*I+1), Y(2*I+1), HW, GW)
-                call SIGMAEQ(CX(K), CY(K), X(2*I-1), Y(2*I-1), X(2*I), Y(2*I), &
-                             X(2*I+1), Y(2*I+1), D11, D12, D22, S11, S12, S22)
-                do J = 1, 6
-                    IJ4 = 4*I - 4 + J
-                    if (IJ4 > (4 * NE)) IJ4 = J - 4
-                    SSOL(3*K-2) = SSOL(3*K-2) + D11(J) * DFI(6*I-6+J) - S11(J) * FI(IJ4)
-                    SSOL(3*K-1) = SSOL(3*K-1) + D12(J) * DFI(6*I-6+J) - S12(J) * FI(IJ4)
-                    SSOL(3*K)   = SSOL(3*K)   + D22(J) * DFI(6*I-6+J) - S22(J) * FI(IJ4)
-                    DSOL(2*K-1) = DSOL(2*K-1) + GW(1, J) * DFI(6*I-6+J) - HW(1, J) * FI(IJ4)
-                    DSOL(2*K)   = DSOL(2*K)   + GW(2, J) * DFI(6*I-6+J) - HW(2, J) * FI(IJ4)
+            do EL = 1, NE
+                NO1 = CONEC(EL, 1)
+                NO2 = CONEC(EL, 2)
+                NO3 = CONEC(EL, 3)
+
+                call EXTINEQ(CX(K), CY(K), X(NO1), Y(NO1), X(NO2), Y(NO2), &
+                             X(NO3), Y(NO3), HW, GW)
+                call SIGMAEQ(CX(K), CY(K), X(NO1), Y(NO1), X(NO2), Y(NO2), &
+                             X(NO3), Y(NO3), D11, D12, D22, S11, S12, S22)
+
+                do NODE_LOC = 1, 3
+                    NO_GLOB = CONEC(EL, NODE_LOC)
+                    do DIR = 1, 2
+                        J     = 2 * NODE_LOC - 2 + DIR
+                        COL_G = 6 * EL - 6 + J
+                        COL_H = 2 * NO_GLOB - 2 + DIR
+
+                        SSOL(3*K-2) = SSOL(3*K-2) + D11(J) * DFI(COL_G) - S11(J) * FI(COL_H)
+                        SSOL(3*K-1) = SSOL(3*K-1) + D12(J) * DFI(COL_G) - S12(J) * FI(COL_H)
+                        SSOL(3*K)   = SSOL(3*K)   + D22(J) * DFI(COL_G) - S22(J) * FI(COL_H)
+                        DSOL(2*K-1) = DSOL(2*K-1) + GW(1, J) * DFI(COL_G) - HW(1, J) * FI(COL_H)
+                        DSOL(2*K)   = DSOL(2*K)   + GW(2, J) * DFI(COL_G) - HW(2, J) * FI(COL_H)
+                    end do
                 end do
             end do
 
@@ -440,8 +471,8 @@ contains
     !-------------------------------------------------------------------
     !> @brief Computes the boundary stress tensor (sigma_x, tau_xy,
     !>        sigma_y) and von Mises equivalent stress at each boundary
-    !>        node using shape function derivatives (Section 3.6 &
-    !>        calcula_tens_cont.m).
+    !>        node using element connectivity CONEC and shape function
+    !>        derivatives (Section 3.6 & calcula_tens_cont.m).
     !-------------------------------------------------------------------
     subroutine BOUND_STRESS()
         implicit none
@@ -461,14 +492,10 @@ contains
         E_MOD      = 2.0 * GE * (1.0 + XNU)
 
         do EL = 1, NE
-            ! Global node indices of the 3-node quadratic element
-            NO1 = 2 * EL - 1
-            NO2 = 2 * EL
-            if (EL == NE) then
-                NO3 = 1
-            else
-                NO3 = 2 * EL + 1
-            end if
+            ! Global node indices of the 3-node quadratic element from CONEC
+            NO1 = CONEC(EL, 1)
+            NO2 = CONEC(EL, 2)
+            NO3 = CONEC(EL, 3)
 
             ! Nodal coordinates
             X1 = X(NO1); Y1 = Y(NO1)
@@ -499,13 +526,7 @@ contains
                 LIJ(2, 1) = -NY_VEC; LIJ(2, 2) = NX_VEC
 
                 ! Global node index for current local node
-                if (NO == 1) then
-                    NO_GLOBAL = NO1
-                else if (NO == 2) then
-                    NO_GLOBAL = NO2
-                else
-                    NO_GLOBAL = NO3
-                end if
+                NO_GLOBAL = CONEC(EL, NO)
 
                 ! Element traction at current local node in global coordinates
                 TX = DFI(6*EL - 6 + 2*NO - 1)

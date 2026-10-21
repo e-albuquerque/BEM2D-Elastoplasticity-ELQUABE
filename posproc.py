@@ -11,7 +11,8 @@ from preproc import input_data, compute_inodes
 def read_elquabe_input(filename='eq12cb.dat'):
     """
     Reads the ELQUABE input file (`eq12cb.dat`) and returns material properties,
-    boundary node coordinates, and internal point coordinates.
+    boundary node coordinates, element connectivity (`conec`), and internal
+    point coordinates.
     """
     with open(filename, 'r') as f:
         lines = [line.strip() for line in f if line.strip()]
@@ -27,9 +28,14 @@ def read_elquabe_input(filename='eq12cb.dat'):
     bou_vals = [float(v) for v in lines[2].split()]
     bou_coords = np.array(bou_vals, dtype=np.float64).reshape((n_bou, 2))
 
+    # Read element connectivity matrix (ne lines: NO1 NO2 NO3)
+    conec = np.zeros((ne, 3), dtype=np.int64)
+    for i in range(ne):
+        conec[i, :] = [int(v) for v in lines[3 + i].split()[:3]]
+
     int_coords = np.zeros((n_int, 2), dtype=np.float64)
     if n_int > 0:
-        int_vals = [float(v) for v in lines[3 + ne].split()]
+        int_vals = [float(v) for v in lines[3 + 2 * ne].split()]
         int_coords = np.array(int_vals, dtype=np.float64).reshape((n_int, 2))
 
     return {
@@ -40,6 +46,7 @@ def read_elquabe_input(filename='eq12cb.dat'):
         'ge': ge,
         'xnu': xnu,
         'bou_coords': bou_coords,
+        'conec': conec,
         'int_coords': int_coords,
     }
 
@@ -193,7 +200,7 @@ def export_vtk_and_contours(
     computed_data = compute_inodes(inp_params['file_name'], inp_params['bound_cond'])
 
     coord = computed_data['coordinates']
-    elements = computed_data['elements']
+    ordered_boundary_nodes = computed_data['ordered_boundary_nodes']
     tri6 = computed_data['triangles']
     int_nodes = computed_data['internal_nodes']
 
@@ -206,20 +213,18 @@ def export_vtk_and_contours(
     vm_field = np.zeros(n_total, dtype=np.float64)
 
     # Map boundary node displacements (dpbou.dat) and stresses (stbou.dat)
+    # using the exact ordered_boundary_nodes list from compute_inodes
     dpbou = out['dpbou']
     stbou = out['stbou']
-    bou_idx = 0
-    for elem in elements:
-        for node_id in (elem[0], elem[2]):
-            disp_vec[node_id, 0] = dpbou[bou_idx, 0]
-            disp_vec[node_id, 1] = dpbou[bou_idx, 1]
-            uy_field[node_id] = dpbou[bou_idx, 1]
+    for bou_idx, node_id in enumerate(ordered_boundary_nodes):
+        disp_vec[node_id, 0] = dpbou[bou_idx, 0]
+        disp_vec[node_id, 1] = dpbou[bou_idx, 1]
+        uy_field[node_id] = dpbou[bou_idx, 1]
 
-            sx_field[node_id] = stbou[bou_idx, 0]
-            txy_field[node_id] = stbou[bou_idx, 1]
-            sy_field[node_id] = stbou[bou_idx, 2]
-            vm_field[node_id] = stbou[bou_idx, 3]
-            bou_idx += 1
+        sx_field[node_id] = stbou[bou_idx, 0]
+        txy_field[node_id] = stbou[bou_idx, 1]
+        sy_field[node_id] = stbou[bou_idx, 2]
+        vm_field[node_id] = stbou[bou_idx, 3]
 
     # Map internal node displacements (dpint.dat) and stresses (stint.dat)
     dpint = out['dpint']

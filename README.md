@@ -9,7 +9,7 @@ The program uses the **Boundary Element Method (BEM)** with quadratic boundary e
 The original Fortran 77 codebase has been fully refactored to meet modern high-performance computing standards:
 
 1. **Free-Form & Modular Architecture**: The monolithic code was split into clean F90 modules (`data_mod`, `io_mod`, `assembly_mod`, `solver_mod`), eliminating all legacy `COMMON` blocks, arithmetic `IF`s, and computed `GOTO`s, while enabling strict compiler type checking (`IMPLICIT NONE`).
-2. **Dynamic Memory Allocation**: Static limitations (e.g., fixed dimensions `NX=100`, `NX1=150`) were completely removed. The program now reads the exact number of boundary elements and internal points from the input file and allocates arrays dynamically using `ALLOCATABLE`.
+2. **Dynamic Memory Allocation & Explicit Connectivity**: Static limitations (e.g., fixed dimensions `NX=100`, `NX1=150` and single-loop implicit node numbering) were completely removed. The program now reads the exact number of boundary elements, internal points, and the **element connectivity matrix** (`CONEC`) from the input file, dynamically allocating arrays (`ALLOCATABLE`) and enabling the modeling of multiply-connected domains (e.g., plates with holes or internal cavities).
 3. **OpenMP Parallelization**: The heavy matrix integration and assembly routines (`GHMATEQ` and `INTEREQ`) that build the $G$ and $H$ matrices and evaluate internal points are parallelized with OpenMP, mapping independent collocation and internal points to different CPU threads.
 4. **LAPACK Solver Integration**: The native manual Gaussian elimination solver (`SLNPD`) was replaced with LAPACK's highly optimized `DGESV` (Double-precision Real General Linear Equation Solver) for superior performance and numerical stability in large systems.
 5. **Double Precision Upgrade**: The solver inherently enforces **64-bit double precision** using compiler flags (`-fdefault-real-8`), promoting all `REAL` variables to `REAL*8` (`real64`), guaranteeing highly precise numerical integration.
@@ -21,9 +21,9 @@ The original Fortran 77 codebase has been fully refactored to meet modern high-p
 
 ### Fortran Source Code
 - `main.f90`: Main program entry point.
-- `data_mod.f90`: Global variable declarations and dynamic array allocations (`allocate_arrays`, `deallocate_arrays`).
-- `assembly_mod.f90`: BEM influence matrices integration, assembly, and boundary/internal stress recovery (`GHMATEQ`, `EXTINEQ`, `LOCINEQ`, `INTEREQ`, `BOUND_STRESS`, `CALC_DFFORMA`, `SIGMAEQ`).
-- `io_mod.f90`: Input/Output routines (`INPUTEQ`, `OUTPTEQ`).
+- `data_mod.f90`: Global variable declarations, element connectivity matrix (`CONEC`), and dynamic array allocations (`allocate_arrays`, `deallocate_arrays`).
+- `assembly_mod.f90`: Connectivity-driven BEM influence matrices integration, assembly, and boundary/internal stress recovery (`GHMATEQ`, `EXTINEQ`, `LOCINEQ`, `INTEREQ`, `BOUND_STRESS`, `CALC_DFFORMA`, `SIGMAEQ`).
+- `io_mod.f90`: Input/Output routines (`INPUTEQ`, `OUTPTEQ`), reading boundary node coordinates, element connectivity (`CONEC`), boundary conditions, and internal points.
 - `solver_mod.f90`: System of equations solver wrapper for LAPACK (`DGESV`).
 - `elquabe.for`: Original legacy Fortran 77 source code kept for reference.
 

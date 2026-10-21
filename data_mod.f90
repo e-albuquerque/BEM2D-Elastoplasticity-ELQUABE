@@ -12,9 +12,10 @@ module data_mod
     ! Material properties (Shear modulus GE and Poisson's ratio XNU)
     real :: GE, XNU
 
-    ! Dynamically allocated BEM matrices and nodal vectors
+    ! Dynamically allocated BEM matrices, nodal vectors, and connectivity
     real, allocatable :: G(:,:), H(:,:)
     real, allocatable :: X(:), Y(:)
+    integer, allocatable :: CONEC(:,:)
     real, allocatable :: FI(:), DFI(:)
     integer, allocatable :: KODE(:)
     real, allocatable :: CX(:), CY(:), SSOL(:), DSOL(:)
@@ -39,7 +40,8 @@ contains
 
         allocate(G(NX, NX1))
         allocate(H(NX, NX))
-        allocate(X(N + 1), Y(N + 1))
+        allocate(X(N), Y(N))
+        allocate(CONEC(NE, 3))
         allocate(FI(NX), DFI(NX1))
         allocate(KODE(NX1))
         allocate(SBOU(N, 4))
@@ -60,6 +62,7 @@ contains
         H       = 0.0
         X       = 0.0
         Y       = 0.0
+        CONEC   = 0
         FI      = 0.0
         DFI     = 0.0
         KODE    = 0
@@ -81,6 +84,7 @@ contains
         if (allocated(H))       deallocate(H)
         if (allocated(X))       deallocate(X)
         if (allocated(Y))       deallocate(Y)
+        if (allocated(CONEC))   deallocate(CONEC)
         if (allocated(FI))      deallocate(FI)
         if (allocated(DFI))     deallocate(DFI)
         if (allocated(KODE))    deallocate(KODE)

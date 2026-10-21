@@ -122,7 +122,8 @@ def ensure_mesh_exists(file_name):
 def compute_inodes(file_name, bound_cond):
     """
     Reads a Gmsh `.msh` file and extracts nodes, quadratic boundary elements,
-    domain triangles, internal nodes, and boundary condition mappings.
+    1-based BEM boundary connectivity (`conec`), domain triangles, internal nodes,
+    and boundary condition mappings.
     """
     ensure_mesh_exists(file_name)
     mesh = meshio.read(file_name + '.msh')
@@ -144,12 +145,31 @@ def compute_inodes(file_name, bound_cond):
             'edge': edges[key],
         }
 
+    # Build ordered list of boundary nodes and 1-based BEM connectivity matrix
+    # Note: Gmsh line3 format is [node_start, node_end, node_mid].
+    # BEM local node numbering is [node_start (xi=-1), node_mid (xi=0), node_end (xi=+1)].
+    ordered_boundary_nodes = []
+    gmsh_to_bem = {}
+    for elem in line_elements:
+        for gmsh_node in (int(elem[0]), int(elem[2]), int(elem[1])):
+            if gmsh_node not in gmsh_to_bem:
+                ordered_boundary_nodes.append(gmsh_node)
+                gmsh_to_bem[gmsh_node] = len(ordered_boundary_nodes)
+
+    conec = np.zeros((line_elements.shape[0], 3), dtype=np.int64)
+    for i, elem in enumerate(line_elements):
+        conec[i, 0] = gmsh_to_bem[int(elem[0])]  # Node 1 (xi = -1)
+        conec[i, 1] = gmsh_to_bem[int(elem[2])]  # Node 2 (xi =  0, mid-node)
+        conec[i, 2] = gmsh_to_bem[int(elem[1])]  # Node 3 (xi = +1)
+
     boundary_nodes = np.unique(line_elements)
     all_nodes = np.unique(triangle_elements)
     internal_nodes = [node for node in all_nodes if node not in boundary_nodes]
 
     return {
         'nodes': boundary_nodes,
+        'ordered_boundary_nodes': ordered_boundary_nodes,
+        'conec': conec,
         'internal_nodes': internal_nodes,
         'all_nodes': all_nodes,
         'coordinates': coordinates,
@@ -249,7 +269,9 @@ def format_coord(val):
 
 def create_input_file(filename, computed_data, int_points, type_bcs, val_bcs, input_params):
     """
-    Writes the formatted input file (`eq12cb.dat`) for the Fortran ELQUABE solver.
+    Writes the formatted input file (`eq12cb.dat`) for the Fortran ELQUABE solver,
+    including boundary node coordinates, element connectivity matrix, boundary
+    conditions, and internal point coordinates.
     """
     with open(filename, 'w') as f:
         # 1. Title Line
@@ -257,6 +279,8 @@ def create_input_file(filename, computed_data, int_points, type_bcs, val_bcs, in
 
         nodes = computed_data['coordinates']
         elements = computed_data['elements']
+        ordered_boundary_nodes = computed_data['ordered_boundary_nodes']
+        conec = computed_data['conec']
         num_elements = elements.shape[0]
         num_internal_points = len(int_points)
 
@@ -266,20 +290,20 @@ def create_input_file(filename, computed_data, int_points, type_bcs, val_bcs, in
         # 2. Basic Parameter Line: NE, L, GE, XNU
         f.write(f" {num_elements},{num_internal_points},        {shear_modulus:.1f},{poisson_ratio:.2f}\n")
 
-        # 3. Boundary Nodes Coordinates Line (counter-clockwise: node 1 and mid-node per element)
+        # 3. Boundary Nodes Coordinates Line
         node_coords_list = []
-        for elem in elements:
-            no1_idx = elem[0]
-            no_meio_idx = elem[2]
-            x1, y1 = nodes[no1_idx][0], nodes[no1_idx][1]
-            xm, ym = nodes[no_meio_idx][0], nodes[no_meio_idx][1]
-            node_coords_list.append(f"{format_coord(x1)}  {format_coord(y1)}")
-            node_coords_list.append(f"{format_coord(xm)}  {format_coord(ym)}")
+        for gmsh_node_id in ordered_boundary_nodes:
+            x_val, y_val = nodes[gmsh_node_id][0], nodes[gmsh_node_id][1]
+            node_coords_list.append(f"{format_coord(x_val)}  {format_coord(y_val)}")
 
         node_coords_str = "  ".join(node_coords_list)
         f.write("  " + node_coords_str + "\n")
 
-        # 4. Boundary Conditions Lines (6 pairs of KODE, DFI per element)
+        # 4. Element Connectivity Matrix (NE lines: NO1 NO2 NO3 for each quadratic element)
+        for i in range(num_elements):
+            f.write(f" {conec[i, 0]} {conec[i, 1]} {conec[i, 2]}\n")
+
+        # 5. Boundary Conditions Lines (6 pairs of KODE, DFI per element)
         for i in range(num_elements):
             f.write(f"{type_bcs[i, 0]} {val_bcs[i, 0]:.1f} ")
             f.write(f"{type_bcs[i, 1]} {val_bcs[i, 1]:.1f} ")
@@ -288,7 +312,7 @@ def create_input_file(filename, computed_data, int_points, type_bcs, val_bcs, in
             f.write(f"{type_bcs[i, 4]} {val_bcs[i, 4]:.1f} ")
             f.write(f"{type_bcs[i, 5]} {val_bcs[i, 5]:.1f} \n")
 
-        # 5. Internal Points Coordinates Line
+        # 6. Internal Points Coordinates Line
         int_points_str = " ".join(f"{nodes[p][0]:.1f}  {nodes[p][1]:.1f}" for p in int_points)
         f.write(" " + int_points_str + "\n")
 

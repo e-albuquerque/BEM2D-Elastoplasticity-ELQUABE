@@ -9,8 +9,8 @@ module io_mod
 contains
 
     !-------------------------------------------------------------------
-    !> @brief Reads mesh, material properties, boundary conditions,
-    !>        and internal points from input file, allocating arrays.
+    !> @brief Reads mesh, connectivity, material properties, boundary
+    !>        conditions, and internal points from input file.
     !-------------------------------------------------------------------
     subroutine INPUTEQ()
         implicit none
@@ -44,6 +44,16 @@ contains
                'NODE', 10X, 'X', 18X, 'Y'/)
 240     format(5X, I3, 2(5X, E14.7))
 
+        ! Read element connectivity matrix CONEC(NE, 3)
+        write(IPR, 600)
+600     format(//2X, 'ELEMENT CONNECTIVITY'//4X, &
+               'ELE', 6X, 'NODE 1', 6X, 'NODE 2', 6X, 'NODE 3'/)
+        do I = 1, NE
+            read(INP, *) (CONEC(I, J), J = 1, 3)
+            write(IPR, 650) I, (CONEC(I, J), J = 1, 3)
+        end do
+650     format(4X, I3, 3(6X, I6))
+
         ! Read boundary conditions in DFI(I) vector:
         ! If KODE(I) == 0 -> DFI(I) is a known displacement
         ! If KODE(I) == 1 -> DFI(I) is a known traction
@@ -73,7 +83,8 @@ contains
     !-------------------------------------------------------------------
     subroutine OUTPTEQ()
         implicit none
-        integer :: I, K
+        integer :: I, K, EL
+        real :: TX_BEF, TY_BEF, TX_AFT, TY_AFT
 
         write(IPR, 100)
 100     format(' ', 79('*')//1X, 'RESULTS'//2X, 'BOUNDARY NODES'///10X, &
@@ -88,14 +99,28 @@ contains
 150     format(///28X, 'TRACTION X', 3X, 'TRACTION Y', 3X, 'TRACTION X', &
                3X, 'TRACTION Y'/7X, 'X', 12X, 'Y', 7X, 'BEFORE NODE', 2X, 'BEFORE NODE', &
                2X, 'AFTER NODE', 3X, 'AFTER NODE'/)
-        write(IPR, 250) X(1), Y(1), DFI(6*NE-1), DFI(6*NE), DFI(1), DFI(2)
-        write(IPR, 250) X(2), Y(2), DFI(3), DFI(4), DFI(3), DFI(4)
 
-        do I = 2, NE
-            write(IPR, 250) X(2*I-1), Y(2*I-1), DFI(6*I-7), DFI(6*I-6), &
-                            DFI(6*I-5), DFI(6*I-4)
-            write(IPR, 250) X(2*I), Y(2*I), DFI(6*I-3), DFI(6*I-2), &
-                            DFI(6*I-3), DFI(6*I-2)
+        do I = 1, N
+            TX_BEF = 0.0; TY_BEF = 0.0
+            TX_AFT = 0.0; TY_AFT = 0.0
+            do EL = 1, NE
+                if (CONEC(EL, 2) == I) then
+                    TX_BEF = DFI(6*EL - 3)
+                    TY_BEF = DFI(6*EL - 2)
+                    TX_AFT = DFI(6*EL - 3)
+                    TY_AFT = DFI(6*EL - 2)
+                else
+                    if (CONEC(EL, 3) == I) then
+                        TX_BEF = DFI(6*EL - 1)
+                        TY_BEF = DFI(6*EL)
+                    end if
+                    if (CONEC(EL, 1) == I) then
+                        TX_AFT = DFI(6*EL - 5)
+                        TY_AFT = DFI(6*EL - 4)
+                    end if
+                end if
+            end do
+            write(IPR, 250) X(I), Y(I), TX_BEF, TY_BEF, TX_AFT, TY_AFT
         end do
 250     format(6(1X, E12.5))
 
