@@ -9,16 +9,41 @@ module assembly_mod
     use data_mod
     implicit none
 
+    ! Standard 10-point Gauss-Legendre quadrature coordinates and weights
+    real, parameter :: GI(10) = [ &
+        0.9739065285, -0.9739065285,  0.8650633666, -0.8650633666, &
+        0.6794095683, -0.6794095682,  0.4333953941, -0.4333953941, &
+        0.1488743389, -0.1488743389 ]
+    real, parameter :: OME(10) = [ &
+        0.0666713443, 0.0666713443,  0.1494513491, 0.1494513491, &
+        0.2190863625, 0.2190863625,  0.2692667193, 0.2692667193, &
+        0.2955242247, 0.2955242247 ]
+
+    ! 10-point logarithmic Gauss quadrature coordinates and weights
+    real, parameter :: GIL(10) = [ &
+        0.0090426309, 0.0539712662, 0.1353118246, 0.2470524162, &
+        0.3802125396, 0.5237923179, 0.6657752055, 0.7941904160, &
+        0.8981610912, 0.9688479887 ]
+    real, parameter :: OMEL(10) = [ &
+        0.1209551319, 0.1863635425, 0.1956608732, 0.1735771421, &
+        0.1356956729, 0.0936467585, 0.0557877273, 0.0271598109, &
+        0.0095151826, 0.0016381576 ]
+
 contains
 
     !-------------------------------------------------------------------
     !> @brief Computes the G and H matrices in parallel using OpenMP
-    !>        and element connectivity CONEC, then forms the linear
+    !>        and element connectivity CONEC, precomputing shape
+    !>        functions at all integration points and element Jacobians
+    !>        and normal vectors once per element, then forms the linear
     !>        system A * X = F (where A is stored in H and F in FI).
     !-------------------------------------------------------------------
     subroutine GHMATEQ()
         implicit none
         real :: HW(2, 6), GW(2, 6), CH
+        real :: SF_G(10, 3), SF_GL(10, 6)
+        real :: XJA(10), ETA1(10), ETA2(10)
+        real :: X1, Y1, X2, Y2, X3, Y3, A, B, C, D
         integer :: EL, I, J, K, LL, NODO
         integer :: NO1, NO2, NO3, NODE_LOC, DIR, NO_GLOB, COL_H, COL_G
         integer :: FIRST_G_DOF(NN)
@@ -27,15 +52,56 @@ contains
         G  = 0.0
         FI = 0.0
 
-        ! Compute the GW and HW matrices for each collocation point
-        ! and each boundary element in parallel across CPU threads
-        !$omp parallel do default(shared) private(LL, EL, NO1, NO2, NO3, NODO, HW, GW, K, NODE_LOC, NO_GLOB, DIR, J, COL_H, COL_G) schedule(dynamic)
-        do LL = 1, N
-            do EL = 1, NE
-                NO1 = CONEC(EL, 1)
-                NO2 = CONEC(EL, 2)
-                NO3 = CONEC(EL, 3)
+        ! Precompute shape functions at all integration points (standard
+        ! Gauss and logarithmic Gauss) before starting the element and
+        ! collocation point loops
+        do I = 1, 10
+            ! Quadratic shape functions at standard Gauss points GI(I)
+            SF_G(I, 1) = GI(I) * (GI(I) - 1.0) * 0.5
+            SF_G(I, 2) = 1.0 - GI(I)**2
+            SF_G(I, 3) = GI(I) * (GI(I) + 1.0) * 0.5
 
+            ! Quadratic shape functions at logarithmic Gauss points GIL(I)
+            ! Columns 1..3: extreme node singular transformation (NODO = 1 or 3)
+            SF_GL(I, 1) = (GIL(I) - 1.0) * (2.0 * GIL(I) - 1.0)
+            SF_GL(I, 2) = 4.0 * GIL(I) * (1.0 - GIL(I))
+            SF_GL(I, 3) = GIL(I) * (2.0 * GIL(I) - 1.0)
+            ! Columns 4..6: mid-node singular transformation (NODO = 2)
+            SF_GL(I, 4) = 0.5 * GIL(I) * (GIL(I) - 1.0)
+            SF_GL(I, 5) = 1.0 - GIL(I)**2
+            SF_GL(I, 6) = 0.5 * GIL(I) * (GIL(I) + 1.0)
+        end do
+
+        ! Outer loop over boundary elements, inner loop over collocation
+        ! (source) points so element Jacobians and normal vectors are
+        ! computed only once per element
+        !$omp parallel do default(shared) &
+        !$omp private(EL, LL, I, NO1, NO2, NO3, X1, Y1, X2, Y2, X3, Y3, A, B, C, D, &
+        !$omp         XJA, ETA1, ETA2, NODO, HW, GW, K, NODE_LOC, NO_GLOB, DIR, J, COL_H, COL_G) &
+        !$omp schedule(dynamic)
+        do EL = 1, NE
+            NO1 = CONEC(EL, 1)
+            NO2 = CONEC(EL, 2)
+            NO3 = CONEC(EL, 3)
+
+            X1 = X(NO1); Y1 = Y(NO1)
+            X2 = X(NO2); Y2 = Y(NO2)
+            X3 = X(NO3); Y3 = Y(NO3)
+
+            ! Compute Jacobians and outward unit normal vectors once for element EL
+            A = X3 - 2.0 * X2 + X1
+            B = (X3 - X1) / 2.0
+            C = Y3 - 2.0 * Y2 + Y1
+            D = (Y3 - Y1) / 2.0
+
+            do I = 1, 10
+                XJA(I)  = sqrt((GI(I) * A + B)**2 + (GI(I) * C + D)**2)
+                ETA1(I) =  (GI(I) * C + D) / XJA(I)
+                ETA2(I) = -(GI(I) * A + B) / XJA(I)
+            end do
+
+            ! Loop over collocation (source) points
+            do LL = 1, N
                 ! Check if collocation node LL belongs to element EL
                 if (LL == NO1) then
                     NODO = 1
@@ -48,10 +114,12 @@ contains
                 end if
 
                 if (NODO > 0) then
-                    call EXTINEQ(X(LL), Y(LL), X(NO1), Y(NO1), X(NO2), Y(NO2), X(NO3), Y(NO3), HW, GW)
-                    call LOCINEQ(X(NO1), Y(NO1), X(NO2), Y(NO2), X(NO3), Y(NO3), GW, NODO)
+                    call EXTINEQ(X(LL), Y(LL), X1, Y1, X2, Y2, X3, Y3, &
+                                 SF_G, XJA, ETA1, ETA2, HW, GW)
+                    call LOCINEQ(X1, Y1, X2, Y2, X3, Y3, SF_G, SF_GL, GW, NODO)
                 else
-                    call EXTINEQ(X(LL), Y(LL), X(NO1), Y(NO1), X(NO2), Y(NO2), X(NO3), Y(NO3), HW, GW)
+                    call EXTINEQ(X(LL), Y(LL), X1, Y1, X2, Y2, X3, Y3, &
+                                 SF_G, XJA, ETA1, ETA2, HW, GW)
                 end if
 
                 ! Plug the GW and HW matrices into the general G and H matrices
@@ -65,6 +133,7 @@ contains
                             COL_H = 2 * NO_GLOB - 2 + DIR
 
                             G(2*LL-2+K, COL_G) = G(2*LL-2+K, COL_G) + GW(K, J)
+                            !$omp atomic
                             H(2*LL-2+K, COL_H) = H(2*LL-2+K, COL_H) + HW(K, J)
                         end do
                     end do
@@ -143,85 +212,74 @@ contains
     !-------------------------------------------------------------------
     !> @brief Computes the HW and GW matrices that relate a collocation
     !>        node (XP, YP) with a boundary element using 10-point
-    !>        Gauss quadrature (non-singular integration).
+    !>        Gauss quadrature (non-singular integration), receiving
+    !>        precomputed shape functions (SF_G), Jacobians (XJA), and
+    !>        outward unit normal components (ETA1, ETA2).
     !-------------------------------------------------------------------
-    subroutine EXTINEQ(XP, YP, X1, Y1, X2, Y2, X3, Y3, HW, GW)
+    subroutine EXTINEQ(XP, YP, X1, Y1, X2, Y2, X3, Y3, SF_G, XJA, ETA1, ETA2, HW, GW)
         implicit none
         real, intent(in)  :: XP, YP, X1, Y1, X2, Y2, X3, Y3
+        real, intent(in)  :: SF_G(10, 3), XJA(10), ETA1(10), ETA2(10)
         real, intent(out) :: HW(2, 6), GW(2, 6)
 
-        real, parameter :: GI(10) = [ &
-            0.9739065285, -0.9739065285,  0.8650633666, -0.8650633666, &
-            0.6794095683, -0.6794095682,  0.4333953941, -0.4333953941, &
-            0.1488743389, -0.1488743389 ]
-        real, parameter :: OME(10) = [ &
-            0.0666713443, 0.0666713443,  0.1494513491, 0.1494513491, &
-            0.2190863625, 0.2190863625,  0.2692667193, 0.2692667193, &
-            0.2955242247, 0.2955242247 ]
-
-        real :: A, B, C, D, DE
-        real :: F1, F2, F3, XCO, YCO, XJA, ETA1, ETA2, RA, RD1, RD2, RDN
+        real :: DE
+        real :: F1, F2, F3, XCO, YCO, XJ, E1, E2, RA, RD1, RD2, RDN
         integer :: I
 
         HW = 0.0
         GW = 0.0
-
-        A  = X3 - 2.0 * X2 + X1
-        B  = (X3 - X1) / 2.0
-        C  = Y3 - 2.0 * Y2 + Y1
-        D  = (Y3 - Y1) / 2.0
         DE = 4.0 * 3.141592 * (1.0 - XNU)
 
         do I = 1, 10
-            ! Shape functions at the integration point
-            F1 = GI(I) * (GI(I) - 1.0) * 0.5
-            F2 = 1.0 - GI(I)**2
-            F3 = GI(I) * (GI(I) + 1.0) * 0.5
+            ! Precomputed shape functions, Jacobian, and unit normal at integration point I
+            F1 = SF_G(I, 1)
+            F2 = SF_G(I, 2)
+            F3 = SF_G(I, 3)
+            XJ = XJA(I)
+            E1 = ETA1(I)
+            E2 = ETA2(I)
 
-            ! Geometrical properties at the integration point
-            XCO  = X1 * F1 + X2 * F2 + X3 * F3
-            YCO  = Y1 * F1 + Y2 * F2 + Y3 * F3
-            XJA  = sqrt((GI(I) * A + B)**2 + (GI(I) * C + D)**2)
-            ETA1 =  (GI(I) * C + D) / XJA
-            ETA2 = -(GI(I) * A + B) / XJA
-            RA   = sqrt((XP - XCO)**2 + (YP - YCO)**2)
-            RD1  = (XCO - XP) / RA
-            RD2  = (YCO - YP) / RA
-            RDN  = RD1 * ETA1 + RD2 * ETA2
+            ! Coordinates of integration point and radial distance to source point (XP, YP)
+            XCO = X1 * F1 + X2 * F2 + X3 * F3
+            YCO = Y1 * F1 + Y2 * F2 + Y3 * F3
+            RA  = sqrt((XP - XCO)**2 + (YP - YCO)**2)
+            RD1 = (XCO - XP) / RA
+            RD2 = (YCO - YP) / RA
+            RDN = RD1 * E1 + RD2 * E2
 
             ! Compute GW and HW matrices
-            GW(1, 1) = GW(1, 1) + ((3.0 - 4.0 * XNU) * log(1.0 / RA) + RD1**2) * OME(I) * XJA * F1 / (2.0 * DE * GE)
-            GW(1, 2) = GW(1, 2) + RD1 * RD2 * OME(I) * XJA * F1 / (2.0 * DE * GE)
+            GW(1, 1) = GW(1, 1) + ((3.0 - 4.0 * XNU) * log(1.0 / RA) + RD1**2) * OME(I) * XJ * F1 / (2.0 * DE * GE)
+            GW(1, 2) = GW(1, 2) + RD1 * RD2 * OME(I) * XJ * F1 / (2.0 * DE * GE)
             GW(2, 1) = GW(1, 2)
-            GW(2, 2) = GW(2, 2) + ((3.0 - 4.0 * XNU) * log(1.0 / RA) + RD2**2) * OME(I) * XJA * F1 / (2.0 * DE * GE)
-            HW(1, 1) = HW(1, 1) - RDN * ((1.0 - 2.0 * XNU) + 2.0 * RD1**2) / (RA * DE) * OME(I) * XJA * F1
-            HW(1, 2) = HW(1, 2) - (RDN * 2.0 * RD1 * RD2 + (1.0 - 2.0 * XNU) * (ETA1 * RD2 - ETA2 * RD1)) * &
-                                  OME(I) * XJA * F1 / (RA * DE)
-            HW(2, 1) = HW(2, 1) - (RDN * 2.0 * RD1 * RD2 + (1.0 - 2.0 * XNU) * (ETA2 * RD1 - ETA1 * RD2)) * &
-                                  OME(I) * XJA * F1 / (RA * DE)
-            HW(2, 2) = HW(2, 2) - RDN * ((1.0 - 2.0 * XNU) + 2.0 * RD2**2) * OME(I) * XJA * F1 / (RA * DE)
+            GW(2, 2) = GW(2, 2) + ((3.0 - 4.0 * XNU) * log(1.0 / RA) + RD2**2) * OME(I) * XJ * F1 / (2.0 * DE * GE)
+            HW(1, 1) = HW(1, 1) - RDN * ((1.0 - 2.0 * XNU) + 2.0 * RD1**2) / (RA * DE) * OME(I) * XJ * F1
+            HW(1, 2) = HW(1, 2) - (RDN * 2.0 * RD1 * RD2 + (1.0 - 2.0 * XNU) * (E1 * RD2 - E2 * RD1)) * &
+                                  OME(I) * XJ * F1 / (RA * DE)
+            HW(2, 1) = HW(2, 1) - (RDN * 2.0 * RD1 * RD2 + (1.0 - 2.0 * XNU) * (E2 * RD1 - E1 * RD2)) * &
+                                  OME(I) * XJ * F1 / (RA * DE)
+            HW(2, 2) = HW(2, 2) - RDN * ((1.0 - 2.0 * XNU) + 2.0 * RD2**2) * OME(I) * XJ * F1 / (RA * DE)
 
-            GW(1, 3) = GW(1, 3) + ((3.0 - 4.0 * XNU) * log(1.0 / RA) + RD1**2) * OME(I) * XJA * F2 / (2.0 * DE * GE)
-            GW(1, 4) = GW(1, 4) + RD1 * RD2 * OME(I) * XJA * F2 / (2.0 * DE * GE)
+            GW(1, 3) = GW(1, 3) + ((3.0 - 4.0 * XNU) * log(1.0 / RA) + RD1**2) * OME(I) * XJ * F2 / (2.0 * DE * GE)
+            GW(1, 4) = GW(1, 4) + RD1 * RD2 * OME(I) * XJ * F2 / (2.0 * DE * GE)
             GW(2, 3) = GW(1, 4)
-            GW(2, 4) = GW(2, 4) + ((3.0 - 4.0 * XNU) * log(1.0 / RA) + RD2**2) * OME(I) * XJA * F2 / (2.0 * DE * GE)
-            HW(1, 3) = HW(1, 3) - RDN * ((1.0 - 2.0 * XNU) + 2.0 * RD1**2) / (RA * DE) * OME(I) * XJA * F2
-            HW(1, 4) = HW(1, 4) - (RDN * 2.0 * RD1 * RD2 + (1.0 - 2.0 * XNU) * (ETA1 * RD2 - ETA2 * RD1)) * &
-                                  OME(I) * XJA * F2 / (RA * DE)
-            HW(2, 3) = HW(2, 3) - (RDN * 2.0 * RD1 * RD2 + (1.0 - 2.0 * XNU) * (ETA2 * RD1 - ETA1 * RD2)) * &
-                                  OME(I) * XJA * F2 / (RA * DE)
-            HW(2, 4) = HW(2, 4) - RDN * ((1.0 - 2.0 * XNU) + 2.0 * RD2**2) * OME(I) * XJA * F2 / (RA * DE)
+            GW(2, 4) = GW(2, 4) + ((3.0 - 4.0 * XNU) * log(1.0 / RA) + RD2**2) * OME(I) * XJ * F2 / (2.0 * DE * GE)
+            HW(1, 3) = HW(1, 3) - RDN * ((1.0 - 2.0 * XNU) + 2.0 * RD1**2) / (RA * DE) * OME(I) * XJ * F2
+            HW(1, 4) = HW(1, 4) - (RDN * 2.0 * RD1 * RD2 + (1.0 - 2.0 * XNU) * (E1 * RD2 - E2 * RD1)) * &
+                                  OME(I) * XJ * F2 / (RA * DE)
+            HW(2, 3) = HW(2, 3) - (RDN * 2.0 * RD1 * RD2 + (1.0 - 2.0 * XNU) * (E2 * RD1 - E1 * RD2)) * &
+                                  OME(I) * XJ * F2 / (RA * DE)
+            HW(2, 4) = HW(2, 4) - RDN * ((1.0 - 2.0 * XNU) + 2.0 * RD2**2) * OME(I) * XJ * F2 / (RA * DE)
 
-            GW(1, 5) = GW(1, 5) + ((3.0 - 4.0 * XNU) * log(1.0 / RA) + RD1**2) * OME(I) * XJA * F3 / (2.0 * DE * GE)
-            GW(1, 6) = GW(1, 6) + RD1 * RD2 * OME(I) * XJA * F3 / (2.0 * DE * GE)
+            GW(1, 5) = GW(1, 5) + ((3.0 - 4.0 * XNU) * log(1.0 / RA) + RD1**2) * OME(I) * XJ * F3 / (2.0 * DE * GE)
+            GW(1, 6) = GW(1, 6) + RD1 * RD2 * OME(I) * XJ * F3 / (2.0 * DE * GE)
             GW(2, 5) = GW(1, 6)
-            GW(2, 6) = GW(2, 6) + ((3.0 - 4.0 * XNU) * log(1.0 / RA) + RD2**2) * OME(I) * XJA * F3 / (2.0 * DE * GE)
-            HW(1, 5) = HW(1, 5) - RDN * ((1.0 - 2.0 * XNU) + 2.0 * RD1**2) / (RA * DE) * OME(I) * XJA * F3
-            HW(1, 6) = HW(1, 6) - (RDN * 2.0 * RD1 * RD2 + (1.0 - 2.0 * XNU) * (ETA1 * RD2 - ETA2 * RD1)) * &
-                                  OME(I) * XJA * F3 / (RA * DE)
-            HW(2, 5) = HW(2, 5) - (RDN * 2.0 * RD1 * RD2 + (1.0 - 2.0 * XNU) * (ETA2 * RD1 - ETA1 * RD2)) * &
-                                  OME(I) * XJA * F3 / (RA * DE)
-            HW(2, 6) = HW(2, 6) - RDN * ((1.0 - 2.0 * XNU) + 2.0 * RD2**2) * OME(I) * XJA * F3 / (RA * DE)
+            GW(2, 6) = GW(2, 6) + ((3.0 - 4.0 * XNU) * log(1.0 / RA) + RD2**2) * OME(I) * XJ * F3 / (2.0 * DE * GE)
+            HW(1, 5) = HW(1, 5) - RDN * ((1.0 - 2.0 * XNU) + 2.0 * RD1**2) / (RA * DE) * OME(I) * XJ * F3
+            HW(1, 6) = HW(1, 6) - (RDN * 2.0 * RD1 * RD2 + (1.0 - 2.0 * XNU) * (E1 * RD2 - E2 * RD1)) * &
+                                  OME(I) * XJ * F3 / (RA * DE)
+            HW(2, 5) = HW(2, 5) - (RDN * 2.0 * RD1 * RD2 + (1.0 - 2.0 * XNU) * (E2 * RD1 - E1 * RD2)) * &
+                                  OME(I) * XJ * F3 / (RA * DE)
+            HW(2, 6) = HW(2, 6) - RDN * ((1.0 - 2.0 * XNU) + 2.0 * RD2**2) * OME(I) * XJ * F3 / (RA * DE)
         end do
 
     end subroutine EXTINEQ
@@ -229,33 +287,15 @@ contains
     !-------------------------------------------------------------------
     !> @brief Computes the GW matrix when the collocation point is one
     !>        of the nodes of the integration element (singular/logarithmic
-    !>        quadrature).
+    !>        quadrature), receiving precomputed shape functions at
+    !>        standard (SF_G) and logarithmic (SF_GL) Gauss points.
     !-------------------------------------------------------------------
-    subroutine LOCINEQ(XG1, YG1, XG2, YG2, XG3, YG3, GW, NODO)
+    subroutine LOCINEQ(XG1, YG1, XG2, YG2, XG3, YG3, SF_G, SF_GL, GW, NODO)
         implicit none
         real, intent(in)    :: XG1, YG1, XG2, YG2, XG3, YG3
+        real, intent(in)    :: SF_G(10, 3), SF_GL(10, 6)
         integer, intent(in) :: NODO
         real, intent(out)   :: GW(2, 6)
-
-        ! Data for standard Gauss quadrature
-        real, parameter :: GI(10) = [ &
-            0.9739065285, -0.9739065285,  0.8650633666, -0.8650633666, &
-            0.6794095682, -0.6794095682,  0.4333953941, -0.4333953941, &
-            0.1488743389, -0.1488743389 ]
-        real, parameter :: OME(10) = [ &
-            0.0666713443, 0.0666713443,  0.1494513491, 0.1494513491, &
-            0.2190863625, 0.2190863625,  0.2692667193, 0.2692667193, &
-            0.2955242247, 0.2955242247 ]
-
-        ! Data for logarithmic quadrature
-        real, parameter :: GIL(10) = [ &
-            0.0090426309, 0.0539712662, 0.1353118246, 0.2470524162, &
-            0.3802125396, 0.5237923179, 0.6657752055, 0.7941904160, &
-            0.8981610912, 0.9688479887 ]
-        real, parameter :: OMEL(10) = [ &
-            0.1209551319, 0.1863635425, 0.1956608732, 0.1735771421, &
-            0.1356956729, 0.0936467585, 0.0557877273, 0.0271598109, &
-            0.0095151826, 0.0016381576 ]
 
         real :: X1, Y1, X2, Y2, X3, Y3
         real :: A1, B1, A2, B2, A, B, C, CONT1, CONT2
@@ -311,16 +351,16 @@ contains
             T2 = ((A2 * GI(I) + B2)**2) / ((A2 * GI(I) + B2)**2 + (A1 * GI(I) + B1)**2)
             T3 = (A1 * GI(I) + B1) * (A2 * GI(I) + B2) / ((A1 * GI(I) + B1)**2 + (A2 * GI(I) + B2)**2)
 
-            ! Compute shape functions for numerical integration
-            F3   = 0.5 * GI(I) * (GI(I) + 1.0)
-            F2   = 1.0 - GI(I)**2
-            F1   = 0.5 * GI(I) * (GI(I) - 1.0)
-            FL3  = GIL(I) * (2.0 * GIL(I) - 1.0)
-            FL2  = 4.0 * GIL(I) * (1.0 - GIL(I))
-            FL1  = (GIL(I) - 1.0) * (2.0 * GIL(I) - 1.0)
-            FLN3 = 0.5 * GIL(I) * (GIL(I) + 1.0)
-            FLN2 = 1.0 - GIL(I)**2
-            FLN1 = 0.5 * GIL(I) * (GIL(I) - 1.0)
+            ! Precomputed shape functions at standard and logarithmic Gauss points
+            F1   = SF_G(I, 1)
+            F2   = SF_G(I, 2)
+            F3   = SF_G(I, 3)
+            FL1  = SF_GL(I, 1)
+            FL2  = SF_GL(I, 2)
+            FL3  = SF_GL(I, 3)
+            FLN1 = SF_GL(I, 4)
+            FLN2 = SF_GL(I, 5)
+            FLN3 = SF_GL(I, 6)
 
             ! Compute GW coefficients
             select case (NODO)
@@ -376,8 +416,11 @@ contains
         implicit none
         real :: HW(2, 6), GW(2, 6)
         real :: D11(6), D12(6), D22(6), S11(6), S12(6), S22(6)
+        real :: SF_G(10, 3)
+        real :: XJA_EL(NE, 10), ETA1_EL(NE, 10), ETA2_EL(NE, 10)
+        real :: A, B, C, D
         real :: CH, SX, TXY, SY
-        integer :: EL, J, K
+        integer :: EL, I, J, K
         integer :: NO1, NO2, NO3, NODE_LOC, DIR, NO_GLOB, COL_H, COL_G
         integer :: FIRST_G_DOF(NN)
 
@@ -412,6 +455,29 @@ contains
         ! Compute the values of stresses and displacements at internal points
         if (L == 0) return
 
+        ! Precompute shape functions at Gauss points
+        do I = 1, 10
+            SF_G(I, 1) = GI(I) * (GI(I) - 1.0) * 0.5
+            SF_G(I, 2) = 1.0 - GI(I)**2
+            SF_G(I, 3) = GI(I) * (GI(I) + 1.0) * 0.5
+        end do
+
+        ! Precompute Jacobians and outward unit normal vectors for each element
+        do EL = 1, NE
+            NO1 = CONEC(EL, 1)
+            NO2 = CONEC(EL, 2)
+            NO3 = CONEC(EL, 3)
+            A = X(NO3) - 2.0 * X(NO2) + X(NO1)
+            B = (X(NO3) - X(NO1)) / 2.0
+            C = Y(NO3) - 2.0 * Y(NO2) + Y(NO1)
+            D = (Y(NO3) - Y(NO1)) / 2.0
+            do I = 1, 10
+                XJA_EL(EL, I)  = sqrt((GI(I) * A + B)**2 + (GI(I) * C + D)**2)
+                ETA1_EL(EL, I) =  (GI(I) * C + D) / XJA_EL(EL, I)
+                ETA2_EL(EL, I) = -(GI(I) * A + B) / XJA_EL(EL, I)
+            end do
+        end do
+
         !$omp parallel do default(shared) private(K, EL, NO1, NO2, NO3, NODE_LOC, NO_GLOB, DIR, J, COL_G, COL_H, HW, GW, D11, D12, D22, S11, S12, S22, SX, TXY, SY) schedule(dynamic)
         do K = 1, L
             SSOL(3*K-2) = 0.0
@@ -425,9 +491,9 @@ contains
                 NO3 = CONEC(EL, 3)
 
                 call EXTINEQ(CX(K), CY(K), X(NO1), Y(NO1), X(NO2), Y(NO2), &
-                             X(NO3), Y(NO3), HW, GW)
+                             X(NO3), Y(NO3), SF_G, XJA_EL(EL, :), ETA1_EL(EL, :), ETA2_EL(EL, :), HW, GW)
                 call SIGMAEQ(CX(K), CY(K), X(NO1), Y(NO1), X(NO2), Y(NO2), &
-                             X(NO3), Y(NO3), D11, D12, D22, S11, S12, S22)
+                             X(NO3), Y(NO3), SF_G, XJA_EL(EL, :), ETA1_EL(EL, :), ETA2_EL(EL, :), D11, D12, D22, S11, S12, S22)
 
                 do NODE_LOC = 1, 3
                     NO_GLOB = CONEC(EL, NODE_LOC)
@@ -579,24 +645,18 @@ contains
 
     !-------------------------------------------------------------------
     !> @brief Computes the S and D stress kernel matrices using Gauss
-    !>        quadrature to evaluate stress at an internal point (XP, YP).
+    !>        quadrature to evaluate stress at an internal point (XP, YP),
+    !>        receiving precomputed shape functions (SF_G), Jacobians (XJA),
+    !>        and outward unit normal components (ETA1, ETA2).
     !-------------------------------------------------------------------
-    subroutine SIGMAEQ(XP, YP, X1, Y1, X2, Y2, X3, Y3, D11, D12, D22, S11, S12, S22)
+    subroutine SIGMAEQ(XP, YP, X1, Y1, X2, Y2, X3, Y3, SF_G, XJA, ETA1, ETA2, D11, D12, D22, S11, S12, S22)
         implicit none
         real, intent(in)  :: XP, YP, X1, Y1, X2, Y2, X3, Y3
+        real, intent(in)  :: SF_G(10, 3), XJA(10), ETA1(10), ETA2(10)
         real, intent(out) :: D11(6), D12(6), D22(6), S11(6), S12(6), S22(6)
 
-        real, parameter :: GI(10) = [ &
-            0.9739065285, -0.9739065285,  0.8650633666, -0.8650633666, &
-            0.6794095683, -0.6794095682,  0.4333953941, -0.4333953941, &
-            0.1488743389, -0.1488743389 ]
-        real, parameter :: OME(10) = [ &
-            0.0666713443, 0.0666713443,  0.1494513491, 0.1494513491, &
-            0.2190863625, 0.2190863625,  0.2692667193, 0.2692667193, &
-            0.2955242247, 0.2955242247 ]
-
-        real :: FA, AL, A, B, C, D, DE
-        real :: F1, F2, F3, XCO, YCO, XJA, ETA1, ETA2, RA, RD1, RD2, RDN
+        real :: FA, AL, DE
+        real :: F1, F2, F3, XCO, YCO, XJ, E1, E2, RA, RD1, RD2, RDN
         integer :: I
 
         D11 = 0.0
@@ -608,101 +668,97 @@ contains
 
         FA = 1.0 - 4.0 * XNU
         AL = 1.0 - 2.0 * XNU
-        A  = X3 - 2.0 * X2 + X1
-        B  = (X3 - X1) / 2.0
-        C  = Y3 - 2.0 * Y2 + Y1
-        D  = (Y3 - Y1) / 2.0
         DE = 4.0 * 3.141592 * (1.0 - XNU)
 
         do I = 1, 10
-            ! Shape functions at the integration point
-            F1 = GI(I) * (GI(I) - 1.0) * 0.5
-            F2 = 1.0 - GI(I)**2
-            F3 = GI(I) * (GI(I) + 1.0) * 0.5
+            ! Precomputed shape functions, Jacobian, and unit normal at integration point I
+            F1 = SF_G(I, 1)
+            F2 = SF_G(I, 2)
+            F3 = SF_G(I, 3)
+            XJ = XJA(I)
+            E1 = ETA1(I)
+            E2 = ETA2(I)
 
-            ! Geometrical parameters
-            XCO  = X1 * F1 + X2 * F2 + X3 * F3
-            YCO  = Y1 * F1 + Y2 * F2 + Y3 * F3
-            XJA  = sqrt((GI(I) * A + B)**2 + (GI(I) * C + D)**2)
-            ETA1 =  (GI(I) * C + D) / XJA
-            ETA2 = -(GI(I) * A + B) / XJA
-            RA   = sqrt((XP - XCO)**2 + (YP - YCO)**2)
-            RD1  = (XCO - XP) / RA
-            RD2  = (YCO - YP) / RA
-            RDN  = RD1 * ETA1 + RD2 * ETA2
+            ! Coordinates of integration point and radial distance to internal point (XP, YP)
+            XCO = X1 * F1 + X2 * F2 + X3 * F3
+            YCO = Y1 * F1 + Y2 * F2 + Y3 * F3
+            RA  = sqrt((XP - XCO)**2 + (YP - YCO)**2)
+            RD1 = (XCO - XP) / RA
+            RD2 = (YCO - YP) / RA
+            RDN = RD1 * E1 + RD2 * E2
 
             ! Compute D and S coefficients
-            D11(1) = D11(1) + (AL * RD1 + 2.0 * RD1**3) * OME(I) * XJA * F1 / (DE * RA)
-            D11(2) = D11(2) + (2.0 * RD1**2 * RD2 - AL * RD2) * OME(I) * XJA * F1 / (DE * RA)
-            D11(3) = D11(3) + (AL * RD1 + 2.0 * RD1**3) * OME(I) * XJA * F2 / (DE * RA)
-            D11(4) = D11(4) + (2.0 * RD1**2 * RD2 - AL * RD2) * OME(I) * XJA * F2 / (DE * RA)
-            D11(5) = D11(5) + (AL * RD1 + 2.0 * RD1**3) * OME(I) * XJA * F3 / (DE * RA)
-            D11(6) = D11(6) + (2.0 * RD1**2 * RD2 - AL * RD2) * OME(I) * XJA * F3 / (DE * RA)
+            D11(1) = D11(1) + (AL * RD1 + 2.0 * RD1**3) * OME(I) * XJ * F1 / (DE * RA)
+            D11(2) = D11(2) + (2.0 * RD1**2 * RD2 - AL * RD2) * OME(I) * XJ * F1 / (DE * RA)
+            D11(3) = D11(3) + (AL * RD1 + 2.0 * RD1**3) * OME(I) * XJ * F2 / (DE * RA)
+            D11(4) = D11(4) + (2.0 * RD1**2 * RD2 - AL * RD2) * OME(I) * XJ * F2 / (DE * RA)
+            D11(5) = D11(5) + (AL * RD1 + 2.0 * RD1**3) * OME(I) * XJ * F3 / (DE * RA)
+            D11(6) = D11(6) + (2.0 * RD1**2 * RD2 - AL * RD2) * OME(I) * XJ * F3 / (DE * RA)
 
-            D12(1) = D12(1) + (AL * RD2 + 2.0 * RD1**2 * RD2) * F1 / (DE * RA) * OME(I) * XJA
-            D12(2) = D12(2) + (AL * RD1 + 2.0 * RD1 * RD2**2) * F1 / (DE * RA) * OME(I) * XJA
-            D12(3) = D12(3) + (AL * RD2 + 2.0 * RD1**2 * RD2) * F2 / (DE * RA) * OME(I) * XJA
-            D12(4) = D12(4) + (AL * RD1 + 2.0 * RD1 * RD2**2) * F2 / (DE * RA) * OME(I) * XJA
-            D12(5) = D12(5) + (AL * RD2 + 2.0 * RD1**2 * RD2) * F3 / (DE * RA) * OME(I) * XJA
-            D12(6) = D12(6) + (AL * RD1 + 2.0 * RD1 * RD2**2) * F3 / (DE * RA) * OME(I) * XJA
+            D12(1) = D12(1) + (AL * RD2 + 2.0 * RD1**2 * RD2) * F1 / (DE * RA) * OME(I) * XJ
+            D12(2) = D12(2) + (AL * RD1 + 2.0 * RD1 * RD2**2) * F1 / (DE * RA) * OME(I) * XJ
+            D12(3) = D12(3) + (AL * RD2 + 2.0 * RD1**2 * RD2) * F2 / (DE * RA) * OME(I) * XJ
+            D12(4) = D12(4) + (AL * RD1 + 2.0 * RD1 * RD2**2) * F2 / (DE * RA) * OME(I) * XJ
+            D12(5) = D12(5) + (AL * RD2 + 2.0 * RD1**2 * RD2) * F3 / (DE * RA) * OME(I) * XJ
+            D12(6) = D12(6) + (AL * RD1 + 2.0 * RD1 * RD2**2) * F3 / (DE * RA) * OME(I) * XJ
 
-            D22(1) = D22(1) + (2.0 * RD1 * RD2**2 - AL * RD1) * F1 / (DE * RA) * OME(I) * XJA
-            D22(2) = D22(2) + (AL * RD2 + 2.0 * RD2**3) * F1 / (DE * RA) * OME(I) * XJA
-            D22(3) = D22(3) + (2.0 * RD1 * RD2**2 - AL * RD1) * F2 / (DE * RA) * OME(I) * XJA
-            D22(4) = D22(4) + (AL * RD2 + 2.0 * RD2**3) * F2 / (DE * RA) * OME(I) * XJA
-            D22(5) = D22(5) + (2.0 * RD1 * RD2**2 - AL * RD1) * F3 / (DE * RA) * OME(I) * XJA
-            D22(6) = D22(6) + (AL * RD2 + 2.0 * RD2**3) * F3 / (DE * RA) * OME(I) * XJA
+            D22(1) = D22(1) + (2.0 * RD1 * RD2**2 - AL * RD1) * F1 / (DE * RA) * OME(I) * XJ
+            D22(2) = D22(2) + (AL * RD2 + 2.0 * RD2**3) * F1 / (DE * RA) * OME(I) * XJ
+            D22(3) = D22(3) + (2.0 * RD1 * RD2**2 - AL * RD1) * F2 / (DE * RA) * OME(I) * XJ
+            D22(4) = D22(4) + (AL * RD2 + 2.0 * RD2**3) * F2 / (DE * RA) * OME(I) * XJ
+            D22(5) = D22(5) + (2.0 * RD1 * RD2**2 - AL * RD1) * F3 / (DE * RA) * OME(I) * XJ
+            D22(6) = D22(6) + (AL * RD2 + 2.0 * RD2**3) * F3 / (DE * RA) * OME(I) * XJ
 
-            S11(1) = S11(1) + (2.0 * RDN * (AL * RD1 + XNU * 2.0 * RD1 - 4.0 * RD1**3) + 4.0 * XNU * ETA1 * &
-                     RD1**2 + AL * (2.0 * ETA1 * RD1**2 + 2.0 * ETA1) - FA * ETA1) * 2.0 * GE * F1 / (DE * RA**2) * &
-                     OME(I) * XJA
-            S11(2) = S11(2) + (2.0 * RDN * (AL * RD2 - 4.0 * RD1**2 * RD2) + 4.0 * XNU * ETA1 * RD1 * RD2 + &
-                     AL * 2.0 * ETA2 * RD1**2 - FA * ETA2) * 2.0 * GE * F1 / (DE * RA**2) * OME(I) * XJA
-            S11(3) = S11(3) + (2.0 * RDN * (AL * RD1 + XNU * 2.0 * RD1 - 4.0 * RD1**3) + 4.0 * XNU * ETA1 * &
-                     RD1**2 + AL * (2.0 * ETA1 * RD1**2 + 2.0 * ETA1) - FA * ETA1) * 2.0 * GE * F2 / (DE * RA**2) * &
-                     OME(I) * XJA
-            S11(4) = S11(4) + (2.0 * RDN * (AL * RD2 - 4.0 * RD1**2 * RD2) + 4.0 * XNU * ETA1 * RD1 * RD2 + &
-                     AL * 2.0 * ETA2 * RD1**2 - FA * ETA2) * 2.0 * GE * F2 / (DE * RA**2) * OME(I) * XJA
-            S11(5) = S11(5) + (2.0 * RDN * (AL * RD1 + XNU * 2.0 * RD1 - 4.0 * RD1**3) + 4.0 * XNU * ETA1 * &
-                     RD1**2 + AL * (2.0 * ETA1 * RD1**2 + 2.0 * ETA1) - FA * ETA1) * 2.0 * GE * F3 / (DE * RA**2) * &
-                     OME(I) * XJA
-            S11(6) = S11(6) + (2.0 * RDN * (AL * RD2 - 4.0 * RD1**2 * RD2) + 4.0 * XNU * ETA1 * RD1 * RD2 + &
-                     AL * 2.0 * ETA2 * RD1**2 - FA * ETA2) * 2.0 * GE * F3 / (DE * RA**2) * OME(I) * XJA
+            S11(1) = S11(1) + (2.0 * RDN * (AL * RD1 + XNU * 2.0 * RD1 - 4.0 * RD1**3) + 4.0 * XNU * E1 * &
+                     RD1**2 + AL * (2.0 * E1 * RD1**2 + 2.0 * E1) - FA * E1) * 2.0 * GE * F1 / (DE * RA**2) * &
+                     OME(I) * XJ
+            S11(2) = S11(2) + (2.0 * RDN * (AL * RD2 - 4.0 * RD1**2 * RD2) + 4.0 * XNU * E1 * RD1 * RD2 + &
+                     AL * 2.0 * E2 * RD1**2 - FA * E2) * 2.0 * GE * F1 / (DE * RA**2) * OME(I) * XJ
+            S11(3) = S11(3) + (2.0 * RDN * (AL * RD1 + XNU * 2.0 * RD1 - 4.0 * RD1**3) + 4.0 * XNU * E1 * &
+                     RD1**2 + AL * (2.0 * E1 * RD1**2 + 2.0 * E1) - FA * E1) * 2.0 * GE * F2 / (DE * RA**2) * &
+                     OME(I) * XJ
+            S11(4) = S11(4) + (2.0 * RDN * (AL * RD2 - 4.0 * RD1**2 * RD2) + 4.0 * XNU * E1 * RD1 * RD2 + &
+                     AL * 2.0 * E2 * RD1**2 - FA * E2) * 2.0 * GE * F2 / (DE * RA**2) * OME(I) * XJ
+            S11(5) = S11(5) + (2.0 * RDN * (AL * RD1 + XNU * 2.0 * RD1 - 4.0 * RD1**3) + 4.0 * XNU * E1 * &
+                     RD1**2 + AL * (2.0 * E1 * RD1**2 + 2.0 * E1) - FA * E1) * 2.0 * GE * F3 / (DE * RA**2) * &
+                     OME(I) * XJ
+            S11(6) = S11(6) + (2.0 * RDN * (AL * RD2 - 4.0 * RD1**2 * RD2) + 4.0 * XNU * E1 * RD1 * RD2 + &
+                     AL * 2.0 * E2 * RD1**2 - FA * E2) * 2.0 * GE * F3 / (DE * RA**2) * OME(I) * XJ
 
-            S12(1) = S12(1) + (2.0 * RDN * (XNU * RD2 - 4.0 * RD1**2 * RD2) + 2.0 * XNU * (ETA1 * RD2 * &
-                     RD1 + ETA2 * RD1**2) + AL * (2.0 * ETA1 * RD1 * RD2 + ETA2)) * 2.0 * GE * F1 / &
-                     (DE * RA**2) * OME(I) * XJA
-            S12(2) = S12(2) + (2.0 * RDN * (XNU * RD1 - 4.0 * RD1 * RD2**2) + 2.0 * XNU * (ETA1 * RD2**2 + &
-                     ETA2 * RD1 * RD2) + AL * (2.0 * ETA2 * RD1 * RD2 + ETA1)) * 2.0 * GE * F1 / &
-                     (DE * RA**2) * OME(I) * XJA
-            S12(3) = S12(3) + (2.0 * RDN * (XNU * RD2 - 4.0 * RD1**2 * RD2) + 2.0 * XNU * (ETA1 * RD2 * &
-                     RD1 + ETA2 * RD1**2) + AL * (2.0 * ETA1 * RD1 * RD2 + ETA2)) * 2.0 * GE * F2 / &
-                     (DE * RA**2) * OME(I) * XJA
-            S12(4) = S12(4) + (2.0 * RDN * (XNU * RD1 - 4.0 * RD1 * RD2**2) + 2.0 * XNU * (ETA1 * RD2**2 + &
-                     ETA2 * RD1 * RD2) + AL * (2.0 * ETA2 * RD1 * RD2 + ETA1)) * 2.0 * GE * F2 / &
-                     (DE * RA**2) * OME(I) * XJA
-            S12(5) = S12(5) + (2.0 * RDN * (XNU * RD2 - 4.0 * RD1**2 * RD2) + 2.0 * XNU * (ETA1 * RD2 * &
-                     RD1 + ETA2 * RD1**2) + AL * (2.0 * ETA1 * RD1 * RD2 + ETA2)) * 2.0 * GE * F3 / &
-                     (DE * RA**2) * OME(I) * XJA
-            S12(6) = S12(6) + (2.0 * RDN * (XNU * RD1 - 4.0 * RD1 * RD2**2) + 2.0 * XNU * (ETA1 * RD2**2 + &
-                     ETA2 * RD1 * RD2) + AL * (2.0 * ETA2 * RD1 * RD2 + ETA1)) * 2.0 * GE * F3 / &
-                     (DE * RA**2) * OME(I) * XJA
+            S12(1) = S12(1) + (2.0 * RDN * (XNU * RD2 - 4.0 * RD1**2 * RD2) + 2.0 * XNU * (E1 * RD2 * &
+                     RD1 + E2 * RD1**2) + AL * (2.0 * E1 * RD1 * RD2 + E2)) * 2.0 * GE * F1 / &
+                     (DE * RA**2) * OME(I) * XJ
+            S12(2) = S12(2) + (2.0 * RDN * (XNU * RD1 - 4.0 * RD1 * RD2**2) + 2.0 * XNU * (E1 * RD2**2 + &
+                     E2 * RD1 * RD2) + AL * (2.0 * E2 * RD1 * RD2 + E1)) * 2.0 * GE * F1 / &
+                     (DE * RA**2) * OME(I) * XJ
+            S12(3) = S12(3) + (2.0 * RDN * (XNU * RD2 - 4.0 * RD1**2 * RD2) + 2.0 * XNU * (E1 * RD2 * &
+                     RD1 + E2 * RD1**2) + AL * (2.0 * E1 * RD1 * RD2 + E2)) * 2.0 * GE * F2 / &
+                     (DE * RA**2) * OME(I) * XJ
+            S12(4) = S12(4) + (2.0 * RDN * (XNU * RD1 - 4.0 * RD1 * RD2**2) + 2.0 * XNU * (E1 * RD2**2 + &
+                     E2 * RD1 * RD2) + AL * (2.0 * E2 * RD1 * RD2 + E1)) * 2.0 * GE * F2 / &
+                     (DE * RA**2) * OME(I) * XJ
+            S12(5) = S12(5) + (2.0 * RDN * (XNU * RD2 - 4.0 * RD1**2 * RD2) + 2.0 * XNU * (E1 * RD2 * &
+                     RD1 + E2 * RD1**2) + AL * (2.0 * E1 * RD1 * RD2 + E2)) * 2.0 * GE * F3 / &
+                     (DE * RA**2) * OME(I) * XJ
+            S12(6) = S12(6) + (2.0 * RDN * (XNU * RD1 - 4.0 * RD1 * RD2**2) + 2.0 * XNU * (E1 * RD2**2 + &
+                     E2 * RD1 * RD2) + AL * (2.0 * E2 * RD1 * RD2 + E1)) * 2.0 * GE * F3 / &
+                     (DE * RA**2) * OME(I) * XJ
 
-            S22(1) = S22(1) + (2.0 * RDN * (AL * RD1 - 4.0 * RD1 * RD2**2) + 4.0 * XNU * ETA2 * RD1 * RD2 + &
-                     AL * 2.0 * ETA1 * RD2**2 - FA * ETA1) * 2.0 * GE * F1 / (DE * RA**2) * OME(I) * XJA
-            S22(2) = S22(2) + (2.0 * RDN * (AL * RD2 + 2.0 * XNU * RD2 - 4.0 * RD2**3) + 4.0 * XNU * ETA2 * &
-                     RD2**2 + AL * (2.0 * ETA2 * RD2**2 + 2.0 * ETA2) - FA * ETA2) * 2.0 * GE * F1 / &
-                     (DE * RA**2) * OME(I) * XJA
-            S22(3) = S22(3) + (2.0 * RDN * (AL * RD1 - 4.0 * RD1 * RD2**2) + 4.0 * XNU * ETA2 * RD1 * RD2 + &
-                     AL * 2.0 * ETA1 * RD2**2 - FA * ETA1) * 2.0 * GE * F2 / (DE * RA**2) * OME(I) * XJA
-            S22(4) = S22(4) + (2.0 * RDN * (AL * RD2 + 2.0 * XNU * RD2 - 4.0 * RD2**3) + 4.0 * XNU * ETA2 * &
-                     RD2**2 + AL * (2.0 * ETA2 * RD2**2 + 2.0 * ETA2) - FA * ETA2) * 2.0 * GE * F2 / &
-                     (DE * RA**2) * OME(I) * XJA
-            S22(5) = S22(5) + (2.0 * RDN * (AL * RD1 - 4.0 * RD1 * RD2**2) + 4.0 * XNU * ETA2 * RD1 * RD2 + &
-                     AL * 2.0 * ETA1 * RD2**2 - FA * ETA1) * 2.0 * GE * F3 / (DE * RA**2) * OME(I) * XJA
-            S22(6) = S22(6) + (2.0 * RDN * (AL * RD2 + 2.0 * XNU * RD2 - 4.0 * RD2**3) + 4.0 * XNU * ETA2 * &
-                     RD2**2 + AL * (2.0 * ETA2 * RD2**2 + 2.0 * ETA2) - FA * ETA2) * 2.0 * GE * F3 / &
-                     (DE * RA**2) * OME(I) * XJA
+            S22(1) = S22(1) + (2.0 * RDN * (AL * RD1 - 4.0 * RD1 * RD2**2) + 4.0 * XNU * E2 * RD1 * RD2 + &
+                     AL * 2.0 * E1 * RD2**2 - FA * E1) * 2.0 * GE * F1 / (DE * RA**2) * OME(I) * XJ
+            S22(2) = S22(2) + (2.0 * RDN * (AL * RD2 + 2.0 * XNU * RD2 - 4.0 * RD2**3) + 4.0 * XNU * E2 * &
+                     RD2**2 + AL * (2.0 * E2 * RD2**2 + 2.0 * E2) - FA * E2) * 2.0 * GE * F1 / &
+                     (DE * RA**2) * OME(I) * XJ
+            S22(3) = S22(3) + (2.0 * RDN * (AL * RD1 - 4.0 * RD1 * RD2**2) + 4.0 * XNU * E2 * RD1 * RD2 + &
+                     AL * 2.0 * E1 * RD2**2 - FA * E1) * 2.0 * GE * F2 / (DE * RA**2) * OME(I) * XJ
+            S22(4) = S22(4) + (2.0 * RDN * (AL * RD2 + 2.0 * XNU * RD2 - 4.0 * RD2**3) + 4.0 * XNU * E2 * &
+                     RD2**2 + AL * (2.0 * E2 * RD2**2 + 2.0 * E2) - FA * E2) * 2.0 * GE * F2 / &
+                     (DE * RA**2) * OME(I) * XJ
+            S22(5) = S22(5) + (2.0 * RDN * (AL * RD1 - 4.0 * RD1 * RD2**2) + 4.0 * XNU * E2 * RD1 * RD2 + &
+                     AL * 2.0 * E1 * RD2**2 - FA * E1) * 2.0 * GE * F3 / (DE * RA**2) * OME(I) * XJ
+            S22(6) = S22(6) + (2.0 * RDN * (AL * RD2 + 2.0 * XNU * RD2 - 4.0 * RD2**3) + 4.0 * XNU * E2 * &
+                     RD2**2 + AL * (2.0 * E2 * RD2**2 + 2.0 * E2) - FA * E2) * 2.0 * GE * F3 / &
+                     (DE * RA**2) * OME(I) * XJ
         end do
 
     end subroutine SIGMAEQ
