@@ -198,30 +198,115 @@ def comp_xyplot(elem, nodes):
     return xplot, yplot
 
 
-def show_geometry(nodes, xplot, yplot, elem, save_path='geometry.png'):
+def show_geometry(coord, xplot, yplot, elem, tri6, type_bcs, val_bcs, save_path='geometry.png'):
     """
-    Plots the boundary element geometry and nodes, saving to `geometry.png`.
+    Visualizes the quadratic mesh and global (x, y) boundary conditions of the 2D
+    elastostatic problem, saving the figure to `geometry.png`.
+
+    Adapted from `show_problem` in `graphics.py` for continuous 3-node quadratic
+    boundary elements and boundary conditions prescribed in the global xy system:
+      - Dirichlet BCs (known displacement): red markers ('rx' for x, 'rP' for y)
+        and red arrows.
+      - Neumann BCs (known traction): blue markers ('bx' for x, 'bP' for y)
+        and blue arrows.
     """
-    xnode = nodes[:, 0]
-    ynode = nodes[:, 1]
+    num_elements = elem.shape[0]
+    b_nodes = np.zeros((3 * num_elements, 2), dtype=np.float64)
+    bcs = np.zeros((3 * num_elements, 4), dtype=np.float64)
+
+    for i in range(num_elements):
+        # Local nodes in BEM order: [node1 (xi=-1), node2 (xi=0), node3 (xi=+1)]
+        local_gmsh_nodes = [elem[i, 0], elem[i, 2], elem[i, 1]]
+        for j, gnode in enumerate(local_gmsh_nodes):
+            idx = 3 * i + j
+            b_nodes[idx, 0] = coord[gnode, 0]
+            b_nodes[idx, 1] = coord[gnode, 1]
+            bcs[idx, 0] = type_bcs[i, 2 * j]      # bc_type in x (0=displacement, 1=traction)
+            bcs[idx, 1] = val_bcs[i, 2 * j]       # bc_value in x
+            bcs[idx, 2] = type_bcs[i, 2 * j + 1]  # bc_type in y (0=displacement, 1=traction)
+            bcs[idx, 3] = val_bcs[i, 2 * j + 1]   # bc_value in y
+
+    # Extract indices of element nodes with known displacement (0) and traction (1)
+    indknown_ux = np.where(bcs[:, 0] == 0)[0]  # Dirichlet BC in x
+    indknown_tx = np.where(bcs[:, 0] == 1)[0]  # Neumann BC in x
+    indknown_uy = np.where(bcs[:, 2] == 0)[0]  # Dirichlet BC in y
+    indknown_ty = np.where(bcs[:, 2] == 1)[0]  # Neumann BC in y
+
+    # Determine plot limits to provide a 15% margin around the geometry
+    x_min, x_max = np.min(coord[:, 0]), np.max(coord[:, 0])
+    y_min, y_max = np.min(coord[:, 1]), np.max(coord[:, 1])
+    delta_x, delta_y = x_max - x_min, y_max - y_min
+    max_delta = max(delta_x, delta_y) if max(delta_x, delta_y) > 0 else 1.0
+    max_bc_val = np.max(np.abs(bcs[:, [1, 3]]))
+    arrow_scale = (10.0 * max_bc_val / max_delta) if max_bc_val > 0 else 10.0
 
     fig, ax = plt.subplots(figsize=(6, 6))
-    ax.plot(xnode[elem[:, 0]], ynode[elem[:, 0]], 'gd', markersize=8, label='Element Extreme Nodes')
-    ax.plot(xnode, ynode, 'ro', markersize=4, label='All Mesh Nodes')
-    ax.set_aspect('equal')
+    ax.grid(True, linestyle='--', alpha=0.4)
 
-    n_el = elem.shape[0]
-    for i in range(n_el):
-        x = xplot[i, :]
-        y = yplot[i, :]
-        line_segments = LineCollection([list(zip(x, y))], linestyles='solid', colors='tab:blue')
+    # Plot the underlying triangular mesh
+    tri3 = tri6[:, :3]
+    ax.triplot(coord[:, 0], coord[:, 1], tri3, color="black", linewidth=0.4)
+
+    # Plot quadratic boundary element curves
+    for i in range(num_elements):
+        line_segments = LineCollection(
+            [list(zip(xplot[i, :], yplot[i, :]))],
+            linestyles='solid',
+            colors='black',
+            linewidths=0.8,
+        )
         ax.add_collection(line_segments)
 
+    # Plot global x-direction vectors (scaled by BC value) for known traction (blue)
+    if len(indknown_tx) > 0:
+        ax.quiver(
+            b_nodes[indknown_tx, 0], b_nodes[indknown_tx, 1],
+            bcs[indknown_tx, 1], np.zeros_like(bcs[indknown_tx, 1]),
+            color="blue", angles='xy', scale_units='xy', scale=arrow_scale,
+            width=0.004, headaxislength=0,
+        )
+
+    # Plot global x-direction vectors (scaled by BC value) for known displacement (red)
+    if len(indknown_ux) > 0:
+        ax.quiver(
+            b_nodes[indknown_ux, 0], b_nodes[indknown_ux, 1],
+            bcs[indknown_ux, 1], np.zeros_like(bcs[indknown_ux, 1]),
+            color="red", angles='xy', scale_units='xy', scale=arrow_scale,
+            width=0.004, headaxislength=0,
+        )
+
+    # Plot global y-direction vectors (scaled by BC value) for known traction (blue)
+    if len(indknown_ty) > 0:
+        ax.quiver(
+            b_nodes[indknown_ty, 0], b_nodes[indknown_ty, 1],
+            np.zeros_like(bcs[indknown_ty, 3]), bcs[indknown_ty, 3],
+            color="blue", angles='xy', scale_units='xy', scale=arrow_scale,
+            width=0.004, headaxislength=0,
+        )
+
+    # Plot global y-direction vectors (scaled by BC value) for known displacement (red)
+    if len(indknown_uy) > 0:
+        ax.quiver(
+            b_nodes[indknown_uy, 0], b_nodes[indknown_uy, 1],
+            np.zeros_like(bcs[indknown_uy, 3]), bcs[indknown_uy, 3],
+            color="red", angles='xy', scale_units='xy', scale=arrow_scale,
+            width=0.004, headaxislength=0,
+        )
+
+    # Plot nodes with known traction (blue markers) and known displacement (red markers)
+    # Note: red markers (Dirichlet) are plotted after blue markers so shared corner
+    # nodes with prescribed displacement remain visible in continuous elements.
+    ax.plot(b_nodes[indknown_tx, 0], b_nodes[indknown_tx, 1], 'bx', markersize=6, label='Known $t_x$')
+    ax.plot(b_nodes[indknown_ty, 0], b_nodes[indknown_ty, 1], 'bP', markersize=4, label='Known $t_y$')
+    ax.plot(b_nodes[indknown_ux, 0], b_nodes[indknown_ux, 1], 'rx', markersize=6, label='Known $u_x$')
+    ax.plot(b_nodes[indknown_uy, 0], b_nodes[indknown_uy, 1], 'rP', markersize=4, label='Known $u_y$')
+
+    ax.set_aspect("equal")
+    ax.set_xlim(x_min - 0.15 * delta_x, x_max + 0.15 * delta_x)
+    ax.set_ylim(y_min - 0.15 * delta_y, y_max + 0.15 * delta_y)
     ax.set_xlabel('x')
     ax.set_ylabel('y')
-    ax.set_title('Quadratic BEM Mesh & Internal Points (ELQUABE)')
-    ax.legend(loc='best')
-    ax.grid(True, linestyle='--', alpha=0.4)
+    ax.set_title('Mesh and Boundary Conditions (ELQUABE)')
 
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     print(f"Geometry plot saved to '{save_path}'.")
@@ -292,7 +377,15 @@ if __name__ == '__main__':
     computed_data = compute_inodes(inp_data['file_name'], inp_data['bound_cond'])
     type_bcs, val_bcs = mount_bcs(computed_data['segments'], computed_data['bc_info'])
     xplot, yplot = comp_xyplot(computed_data['elements'], computed_data['coordinates'])
-    show_geometry(computed_data['coordinates'], xplot, yplot, computed_data['elements'])
+    show_geometry(
+        computed_data['coordinates'],
+        xplot,
+        yplot,
+        computed_data['elements'],
+        computed_data['triangles'],
+        type_bcs,
+        val_bcs,
+    )
 
     inp_data_filename = 'eq12cb.dat'
     int_points = computed_data['internal_nodes']
