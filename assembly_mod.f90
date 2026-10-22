@@ -115,11 +115,11 @@ contains
 
                 if (NODO > 0) then
                     call EXTINEQ(X(LL), Y(LL), X1, Y1, X2, Y2, X3, Y3, &
-                                 SF_G, XJA, ETA1, ETA2, HW, GW)
+                                 SF_G, XJA, ETA1, ETA2, NODO, HW, GW)
                     call LOCINEQ(X1, Y1, X2, Y2, X3, Y3, SF_G, SF_GL, GW, NODO)
                 else
                     call EXTINEQ(X(LL), Y(LL), X1, Y1, X2, Y2, X3, Y3, &
-                                 SF_G, XJA, ETA1, ETA2, HW, GW)
+                                 SF_G, XJA, ETA1, ETA2, NODO, HW, GW)
                 end if
 
                 ! Plug the GW and HW matrices into the general G and H matrices
@@ -210,19 +210,43 @@ contains
     end subroutine GHMATEQ
 
     !-------------------------------------------------------------------
-    !> @brief Computes the HW and GW matrices that relate a collocation
-    !>        node (XP, YP) with a boundary element using 10-point
-    !>        Gauss quadrature (non-singular integration), receiving
-    !>        precomputed shape functions (SF_G), Jacobians (XJA), and
-    !>        outward unit normal components (ETA1, ETA2).
+    !> @brief Evaluates the hyperbolic sine (sinh) coordinate
+    !>        transformation (Johnston & Elliott, 2005) to treat
+    !>        near-singular integrals when the source point does not
+    !>        belong to the integration element.
     !-------------------------------------------------------------------
-    subroutine EXTINEQ(XP, YP, X1, Y1, X2, Y2, X3, Y3, SF_G, XJA, ETA1, ETA2, HW, GW)
+    subroutine SINHTRANS(U, A, B_IN, XI, JT)
         implicit none
-        real, intent(in)  :: XP, YP, X1, Y1, X2, Y2, X3, Y3
-        real, intent(in)  :: SF_G(10, 3), XJA(10), ETA1(10), ETA2(10)
-        real, intent(out) :: HW(2, 6), GW(2, 6)
+        real, intent(in)  :: U, A, B_IN
+        real, intent(out) :: XI, JT
+        real :: B, MI, ETA
 
-        real :: DE
+        B = B_IN
+        if (B < 1.0e-8) B = 1.0e-8
+
+        MI  = 0.5 * (asinh((1.0 + A) / B) + asinh((1.0 - A) / B))
+        ETA = 0.5 * (asinh((1.0 + A) / B) - asinh((1.0 - A) / B))
+        XI  = A + B * sinh(MI * U - ETA)
+        JT  = B * MI * cosh(MI * U - ETA)
+    end subroutine SINHTRANS
+
+    !-------------------------------------------------------------------
+    !> @brief Computes the HW and GW matrices that relate a source
+    !>        node (XP, YP) with a boundary element using 10-point
+    !>        Gauss quadrature. When the source point does not belong to
+    !>        the element (NODO == 0), applies the sinh transformation
+    !>        to eliminate near-singularity errors.
+    !-------------------------------------------------------------------
+    subroutine EXTINEQ(XP, YP, X1, Y1, X2, Y2, X3, Y3, SF_G, XJA, ETA1, ETA2, NODO, HW, GW)
+        implicit none
+        real, intent(in)    :: XP, YP, X1, Y1, X2, Y2, X3, Y3
+        real, intent(in)    :: SF_G(10, 3), XJA(10), ETA1(10), ETA2(10)
+        integer, intent(in) :: NODO
+        real, intent(out)   :: HW(2, 6), GW(2, 6)
+
+        real :: A, B, C, D, DE
+        real :: DX_EL, DY_EL, NORM_DELEM2, NORM_DELEM
+        real :: EET, N1G, N2G, N3G, PSX, PSY, B_DIST, XI, JT, W_EFF
         real :: F1, F2, F3, XCO, YCO, XJ, E1, E2, RA, RD1, RD2, RDN
         integer :: I
 
@@ -230,14 +254,52 @@ contains
         GW = 0.0
         DE = 4.0 * 3.141592 * (1.0 - XNU)
 
+        if (NODO == 0) then
+            A = X3 - 2.0 * X2 + X1
+            B = (X3 - X1) / 2.0
+            C = Y3 - 2.0 * Y2 + Y1
+            D = (Y3 - Y1) / 2.0
+
+            DX_EL       = X3 - X1
+            DY_EL       = Y3 - Y1
+            NORM_DELEM2 = DX_EL**2 + DY_EL**2
+            NORM_DELEM  = sqrt(NORM_DELEM2)
+
+            ! Intrinsic coordinate projection (eet) of the source point onto the element
+            EET = 2.0 * (DX_EL * (XP - X1) + DY_EL * (YP - Y1)) / NORM_DELEM2 - 1.0
+
+            ! Continuous quadratic shape functions evaluated at eet
+            N1G = 0.5 * EET * (EET - 1.0)
+            N2G = 1.0 - EET**2
+            N3G = 0.5 * EET * (1.0 + EET)
+
+            ! Projection point on the element and normalized distance b
+            PSX    = N1G * X1 + N2G * X2 + N3G * X3
+            PSY    = N1G * Y1 + N2G * Y2 + N3G * Y3
+            B_DIST = sqrt((PSX - XP)**2 + (PSY - YP)**2) / NORM_DELEM
+        end if
+
         do I = 1, 10
-            ! Precomputed shape functions, Jacobian, and unit normal at integration point I
-            F1 = SF_G(I, 1)
-            F2 = SF_G(I, 2)
-            F3 = SF_G(I, 3)
-            XJ = XJA(I)
-            E1 = ETA1(I)
-            E2 = ETA2(I)
+            if (NODO == 0) then
+                ! Apply sinh transformation for non-singular / nearly-singular integration
+                call SINHTRANS(GI(I), EET, B_DIST, XI, JT)
+                F1    = 0.5 * XI * (XI - 1.0)
+                F2    = 1.0 - XI**2
+                F3    = 0.5 * XI * (XI + 1.0)
+                XJ    = sqrt((XI * A + B)**2 + (XI * C + D)**2)
+                E1    =  (XI * C + D) / XJ
+                E2    = -(XI * A + B) / XJ
+                W_EFF = OME(I) * XJ * JT
+            else
+                ! Source point belongs to element: use precomputed standard Gauss values
+                F1    = SF_G(I, 1)
+                F2    = SF_G(I, 2)
+                F3    = SF_G(I, 3)
+                XJ    = XJA(I)
+                E1    = ETA1(I)
+                E2    = ETA2(I)
+                W_EFF = OME(I) * XJ
+            end if
 
             ! Coordinates of integration point and radial distance to source point (XP, YP)
             XCO = X1 * F1 + X2 * F2 + X3 * F3
@@ -248,38 +310,38 @@ contains
             RDN = RD1 * E1 + RD2 * E2
 
             ! Compute GW and HW matrices
-            GW(1, 1) = GW(1, 1) + ((3.0 - 4.0 * XNU) * log(1.0 / RA) + RD1**2) * OME(I) * XJ * F1 / (2.0 * DE * GE)
-            GW(1, 2) = GW(1, 2) + RD1 * RD2 * OME(I) * XJ * F1 / (2.0 * DE * GE)
+            GW(1, 1) = GW(1, 1) + ((3.0 - 4.0 * XNU) * log(1.0 / RA) + RD1**2) * W_EFF * F1 / (2.0 * DE * GE)
+            GW(1, 2) = GW(1, 2) + RD1 * RD2 * W_EFF * F1 / (2.0 * DE * GE)
             GW(2, 1) = GW(1, 2)
-            GW(2, 2) = GW(2, 2) + ((3.0 - 4.0 * XNU) * log(1.0 / RA) + RD2**2) * OME(I) * XJ * F1 / (2.0 * DE * GE)
-            HW(1, 1) = HW(1, 1) - RDN * ((1.0 - 2.0 * XNU) + 2.0 * RD1**2) / (RA * DE) * OME(I) * XJ * F1
+            GW(2, 2) = GW(2, 2) + ((3.0 - 4.0 * XNU) * log(1.0 / RA) + RD2**2) * W_EFF * F1 / (2.0 * DE * GE)
+            HW(1, 1) = HW(1, 1) - RDN * ((1.0 - 2.0 * XNU) + 2.0 * RD1**2) / (RA * DE) * W_EFF * F1
             HW(1, 2) = HW(1, 2) - (RDN * 2.0 * RD1 * RD2 + (1.0 - 2.0 * XNU) * (E1 * RD2 - E2 * RD1)) * &
-                                  OME(I) * XJ * F1 / (RA * DE)
+                                  W_EFF * F1 / (RA * DE)
             HW(2, 1) = HW(2, 1) - (RDN * 2.0 * RD1 * RD2 + (1.0 - 2.0 * XNU) * (E2 * RD1 - E1 * RD2)) * &
-                                  OME(I) * XJ * F1 / (RA * DE)
-            HW(2, 2) = HW(2, 2) - RDN * ((1.0 - 2.0 * XNU) + 2.0 * RD2**2) * OME(I) * XJ * F1 / (RA * DE)
+                                  W_EFF * F1 / (RA * DE)
+            HW(2, 2) = HW(2, 2) - RDN * ((1.0 - 2.0 * XNU) + 2.0 * RD2**2) * W_EFF * F1 / (RA * DE)
 
-            GW(1, 3) = GW(1, 3) + ((3.0 - 4.0 * XNU) * log(1.0 / RA) + RD1**2) * OME(I) * XJ * F2 / (2.0 * DE * GE)
-            GW(1, 4) = GW(1, 4) + RD1 * RD2 * OME(I) * XJ * F2 / (2.0 * DE * GE)
+            GW(1, 3) = GW(1, 3) + ((3.0 - 4.0 * XNU) * log(1.0 / RA) + RD1**2) * W_EFF * F2 / (2.0 * DE * GE)
+            GW(1, 4) = GW(1, 4) + RD1 * RD2 * W_EFF * F2 / (2.0 * DE * GE)
             GW(2, 3) = GW(1, 4)
-            GW(2, 4) = GW(2, 4) + ((3.0 - 4.0 * XNU) * log(1.0 / RA) + RD2**2) * OME(I) * XJ * F2 / (2.0 * DE * GE)
-            HW(1, 3) = HW(1, 3) - RDN * ((1.0 - 2.0 * XNU) + 2.0 * RD1**2) / (RA * DE) * OME(I) * XJ * F2
+            GW(2, 4) = GW(2, 4) + ((3.0 - 4.0 * XNU) * log(1.0 / RA) + RD2**2) * W_EFF * F2 / (2.0 * DE * GE)
+            HW(1, 3) = HW(1, 3) - RDN * ((1.0 - 2.0 * XNU) + 2.0 * RD1**2) / (RA * DE) * W_EFF * F2
             HW(1, 4) = HW(1, 4) - (RDN * 2.0 * RD1 * RD2 + (1.0 - 2.0 * XNU) * (E1 * RD2 - E2 * RD1)) * &
-                                  OME(I) * XJ * F2 / (RA * DE)
+                                  W_EFF * F2 / (RA * DE)
             HW(2, 3) = HW(2, 3) - (RDN * 2.0 * RD1 * RD2 + (1.0 - 2.0 * XNU) * (E2 * RD1 - E1 * RD2)) * &
-                                  OME(I) * XJ * F2 / (RA * DE)
-            HW(2, 4) = HW(2, 4) - RDN * ((1.0 - 2.0 * XNU) + 2.0 * RD2**2) * OME(I) * XJ * F2 / (RA * DE)
+                                  W_EFF * F2 / (RA * DE)
+            HW(2, 4) = HW(2, 4) - RDN * ((1.0 - 2.0 * XNU) + 2.0 * RD2**2) * W_EFF * F2 / (RA * DE)
 
-            GW(1, 5) = GW(1, 5) + ((3.0 - 4.0 * XNU) * log(1.0 / RA) + RD1**2) * OME(I) * XJ * F3 / (2.0 * DE * GE)
-            GW(1, 6) = GW(1, 6) + RD1 * RD2 * OME(I) * XJ * F3 / (2.0 * DE * GE)
+            GW(1, 5) = GW(1, 5) + ((3.0 - 4.0 * XNU) * log(1.0 / RA) + RD1**2) * W_EFF * F3 / (2.0 * DE * GE)
+            GW(1, 6) = GW(1, 6) + RD1 * RD2 * W_EFF * F3 / (2.0 * DE * GE)
             GW(2, 5) = GW(1, 6)
-            GW(2, 6) = GW(2, 6) + ((3.0 - 4.0 * XNU) * log(1.0 / RA) + RD2**2) * OME(I) * XJ * F3 / (2.0 * DE * GE)
-            HW(1, 5) = HW(1, 5) - RDN * ((1.0 - 2.0 * XNU) + 2.0 * RD1**2) / (RA * DE) * OME(I) * XJ * F3
+            GW(2, 6) = GW(2, 6) + ((3.0 - 4.0 * XNU) * log(1.0 / RA) + RD2**2) * W_EFF * F3 / (2.0 * DE * GE)
+            HW(1, 5) = HW(1, 5) - RDN * ((1.0 - 2.0 * XNU) + 2.0 * RD1**2) / (RA * DE) * W_EFF * F3
             HW(1, 6) = HW(1, 6) - (RDN * 2.0 * RD1 * RD2 + (1.0 - 2.0 * XNU) * (E1 * RD2 - E2 * RD1)) * &
-                                  OME(I) * XJ * F3 / (RA * DE)
+                                  W_EFF * F3 / (RA * DE)
             HW(2, 5) = HW(2, 5) - (RDN * 2.0 * RD1 * RD2 + (1.0 - 2.0 * XNU) * (E2 * RD1 - E1 * RD2)) * &
-                                  OME(I) * XJ * F3 / (RA * DE)
-            HW(2, 6) = HW(2, 6) - RDN * ((1.0 - 2.0 * XNU) + 2.0 * RD2**2) * OME(I) * XJ * F3 / (RA * DE)
+                                  W_EFF * F3 / (RA * DE)
+            HW(2, 6) = HW(2, 6) - RDN * ((1.0 - 2.0 * XNU) + 2.0 * RD2**2) * W_EFF * F3 / (RA * DE)
         end do
 
     end subroutine EXTINEQ
@@ -495,10 +557,9 @@ contains
 
                 call EXTINEQ(CX(K), CY(K), X(NO1), Y(NO1), X(NO2), Y(NO2), &
                              X(NO3), Y(NO3), SF_G, XJA_EL(EL, :), ETA1_EL(EL, :), &
-                             ETA2_EL(EL, :), HW, GW)
+                             ETA2_EL(EL, :), 0, HW, GW)
                 call SIGMAEQ(CX(K), CY(K), X(NO1), Y(NO1), X(NO2), Y(NO2), &
-                             X(NO3), Y(NO3), SF_G, XJA_EL(EL, :), ETA1_EL(EL, :), &
-                             ETA2_EL(EL, :), D11, D12, D22, S11, S12, S22)
+                             X(NO3), Y(NO3), D11, D12, D22, S11, S12, S22)
 
                 do NODE_LOC = 1, 3
                     NO_GLOB = CONEC(EL, NODE_LOC)
@@ -650,17 +711,17 @@ contains
 
     !-------------------------------------------------------------------
     !> @brief Computes the S and D stress kernel matrices using Gauss
-    !>        quadrature to evaluate stress at an internal point (XP, YP),
-    !>        receiving precomputed shape functions (SF_G), Jacobians (XJA),
-    !>        and outward unit normal components (ETA1, ETA2).
+    !>        quadrature with the sinh transformation (SINHTRANS) to
+    !>        evaluate stress at an internal point (XP, YP).
     !-------------------------------------------------------------------
-    subroutine SIGMAEQ(XP, YP, X1, Y1, X2, Y2, X3, Y3, SF_G, XJA, ETA1, ETA2, D11, D12, D22, S11, S12, S22)
+    subroutine SIGMAEQ(XP, YP, X1, Y1, X2, Y2, X3, Y3, D11, D12, D22, S11, S12, S22)
         implicit none
         real, intent(in)  :: XP, YP, X1, Y1, X2, Y2, X3, Y3
-        real, intent(in)  :: SF_G(10, 3), XJA(10), ETA1(10), ETA2(10)
         real, intent(out) :: D11(6), D12(6), D22(6), S11(6), S12(6), S22(6)
 
-        real :: FA, AL, DE
+        real :: FA, AL, A, B, C, D, DE
+        real :: DX_EL, DY_EL, NORM_DELEM2, NORM_DELEM
+        real :: EET, N1G, N2G, N3G, PSX, PSY, B_DIST, XI, JT, W_EFF
         real :: F1, F2, F3, XCO, YCO, XJ, E1, E2, RA, RD1, RD2, RDN
         integer :: I
 
@@ -673,16 +734,40 @@ contains
 
         FA = 1.0 - 4.0 * XNU
         AL = 1.0 - 2.0 * XNU
+        A  = X3 - 2.0 * X2 + X1
+        B  = (X3 - X1) / 2.0
+        C  = Y3 - 2.0 * Y2 + Y1
+        D  = (Y3 - Y1) / 2.0
         DE = 4.0 * 3.141592 * (1.0 - XNU)
 
+        DX_EL       = X3 - X1
+        DY_EL       = Y3 - Y1
+        NORM_DELEM2 = DX_EL**2 + DY_EL**2
+        NORM_DELEM  = sqrt(NORM_DELEM2)
+
+        ! Intrinsic coordinate projection (eet) of the internal point onto the element
+        EET = 2.0 * (DX_EL * (XP - X1) + DY_EL * (YP - Y1)) / NORM_DELEM2 - 1.0
+
+        ! Continuous quadratic shape functions evaluated at eet
+        N1G = 0.5 * EET * (EET - 1.0)
+        N2G = 1.0 - EET**2
+        N3G = 0.5 * EET * (1.0 + EET)
+
+        ! Projection point on the element and normalized distance b
+        PSX    = N1G * X1 + N2G * X2 + N3G * X3
+        PSY    = N1G * Y1 + N2G * Y2 + N3G * Y3
+        B_DIST = sqrt((PSX - XP)**2 + (PSY - YP)**2) / NORM_DELEM
+
         do I = 1, 10
-            ! Precomputed shape functions, Jacobian, and unit normal at integration point I
-            F1 = SF_G(I, 1)
-            F2 = SF_G(I, 2)
-            F3 = SF_G(I, 3)
-            XJ = XJA(I)
-            E1 = ETA1(I)
-            E2 = ETA2(I)
+            ! Apply sinh transformation for nearly-singular integration
+            call SINHTRANS(GI(I), EET, B_DIST, XI, JT)
+            F1    = 0.5 * XI * (XI - 1.0)
+            F2    = 1.0 - XI**2
+            F3    = 0.5 * XI * (XI + 1.0)
+            XJ    = sqrt((XI * A + B)**2 + (XI * C + D)**2)
+            E1    =  (XI * C + D) / XJ
+            E2    = -(XI * A + B) / XJ
+            W_EFF = OME(I) * XJ * JT
 
             ! Coordinates of integration point and radial distance to internal point (XP, YP)
             XCO = X1 * F1 + X2 * F2 + X3 * F3
@@ -693,77 +778,77 @@ contains
             RDN = RD1 * E1 + RD2 * E2
 
             ! Compute D and S coefficients
-            D11(1) = D11(1) + (AL * RD1 + 2.0 * RD1**3) * OME(I) * XJ * F1 / (DE * RA)
-            D11(2) = D11(2) + (2.0 * RD1**2 * RD2 - AL * RD2) * OME(I) * XJ * F1 / (DE * RA)
-            D11(3) = D11(3) + (AL * RD1 + 2.0 * RD1**3) * OME(I) * XJ * F2 / (DE * RA)
-            D11(4) = D11(4) + (2.0 * RD1**2 * RD2 - AL * RD2) * OME(I) * XJ * F2 / (DE * RA)
-            D11(5) = D11(5) + (AL * RD1 + 2.0 * RD1**3) * OME(I) * XJ * F3 / (DE * RA)
-            D11(6) = D11(6) + (2.0 * RD1**2 * RD2 - AL * RD2) * OME(I) * XJ * F3 / (DE * RA)
+            D11(1) = D11(1) + (AL * RD1 + 2.0 * RD1**3) * W_EFF * F1 / (DE * RA)
+            D11(2) = D11(2) + (2.0 * RD1**2 * RD2 - AL * RD2) * W_EFF * F1 / (DE * RA)
+            D11(3) = D11(3) + (AL * RD1 + 2.0 * RD1**3) * W_EFF * F2 / (DE * RA)
+            D11(4) = D11(4) + (2.0 * RD1**2 * RD2 - AL * RD2) * W_EFF * F2 / (DE * RA)
+            D11(5) = D11(5) + (AL * RD1 + 2.0 * RD1**3) * W_EFF * F3 / (DE * RA)
+            D11(6) = D11(6) + (2.0 * RD1**2 * RD2 - AL * RD2) * W_EFF * F3 / (DE * RA)
 
-            D12(1) = D12(1) + (AL * RD2 + 2.0 * RD1**2 * RD2) * F1 / (DE * RA) * OME(I) * XJ
-            D12(2) = D12(2) + (AL * RD1 + 2.0 * RD1 * RD2**2) * F1 / (DE * RA) * OME(I) * XJ
-            D12(3) = D12(3) + (AL * RD2 + 2.0 * RD1**2 * RD2) * F2 / (DE * RA) * OME(I) * XJ
-            D12(4) = D12(4) + (AL * RD1 + 2.0 * RD1 * RD2**2) * F2 / (DE * RA) * OME(I) * XJ
-            D12(5) = D12(5) + (AL * RD2 + 2.0 * RD1**2 * RD2) * F3 / (DE * RA) * OME(I) * XJ
-            D12(6) = D12(6) + (AL * RD1 + 2.0 * RD1 * RD2**2) * F3 / (DE * RA) * OME(I) * XJ
+            D12(1) = D12(1) + (AL * RD2 + 2.0 * RD1**2 * RD2) * F1 / (DE * RA) * W_EFF
+            D12(2) = D12(2) + (AL * RD1 + 2.0 * RD1 * RD2**2) * F1 / (DE * RA) * W_EFF
+            D12(3) = D12(3) + (AL * RD2 + 2.0 * RD1**2 * RD2) * F2 / (DE * RA) * W_EFF
+            D12(4) = D12(4) + (AL * RD1 + 2.0 * RD1 * RD2**2) * F2 / (DE * RA) * W_EFF
+            D12(5) = D12(5) + (AL * RD2 + 2.0 * RD1**2 * RD2) * F3 / (DE * RA) * W_EFF
+            D12(6) = D12(6) + (AL * RD1 + 2.0 * RD1 * RD2**2) * F3 / (DE * RA) * W_EFF
 
-            D22(1) = D22(1) + (2.0 * RD1 * RD2**2 - AL * RD1) * F1 / (DE * RA) * OME(I) * XJ
-            D22(2) = D22(2) + (AL * RD2 + 2.0 * RD2**3) * F1 / (DE * RA) * OME(I) * XJ
-            D22(3) = D22(3) + (2.0 * RD1 * RD2**2 - AL * RD1) * F2 / (DE * RA) * OME(I) * XJ
-            D22(4) = D22(4) + (AL * RD2 + 2.0 * RD2**3) * F2 / (DE * RA) * OME(I) * XJ
-            D22(5) = D22(5) + (2.0 * RD1 * RD2**2 - AL * RD1) * F3 / (DE * RA) * OME(I) * XJ
-            D22(6) = D22(6) + (AL * RD2 + 2.0 * RD2**3) * F3 / (DE * RA) * OME(I) * XJ
+            D22(1) = D22(1) + (2.0 * RD1 * RD2**2 - AL * RD1) * F1 / (DE * RA) * W_EFF
+            D22(2) = D22(2) + (AL * RD2 + 2.0 * RD2**3) * F1 / (DE * RA) * W_EFF
+            D22(3) = D22(3) + (2.0 * RD1 * RD2**2 - AL * RD1) * F2 / (DE * RA) * W_EFF
+            D22(4) = D22(4) + (AL * RD2 + 2.0 * RD2**3) * F2 / (DE * RA) * W_EFF
+            D22(5) = D22(5) + (2.0 * RD1 * RD2**2 - AL * RD1) * F3 / (DE * RA) * W_EFF
+            D22(6) = D22(6) + (AL * RD2 + 2.0 * RD2**3) * F3 / (DE * RA) * W_EFF
 
             S11(1) = S11(1) + (2.0 * RDN * (AL * RD1 + XNU * 2.0 * RD1 - 4.0 * RD1**3) + 4.0 * XNU * E1 * &
                      RD1**2 + AL * (2.0 * E1 * RD1**2 + 2.0 * E1) - FA * E1) * 2.0 * GE * F1 / (DE * RA**2) * &
-                     OME(I) * XJ
+                     W_EFF
             S11(2) = S11(2) + (2.0 * RDN * (AL * RD2 - 4.0 * RD1**2 * RD2) + 4.0 * XNU * E1 * RD1 * RD2 + &
-                     AL * 2.0 * E2 * RD1**2 - FA * E2) * 2.0 * GE * F1 / (DE * RA**2) * OME(I) * XJ
+                     AL * 2.0 * E2 * RD1**2 - FA * E2) * 2.0 * GE * F1 / (DE * RA**2) * W_EFF
             S11(3) = S11(3) + (2.0 * RDN * (AL * RD1 + XNU * 2.0 * RD1 - 4.0 * RD1**3) + 4.0 * XNU * E1 * &
                      RD1**2 + AL * (2.0 * E1 * RD1**2 + 2.0 * E1) - FA * E1) * 2.0 * GE * F2 / (DE * RA**2) * &
-                     OME(I) * XJ
+                     W_EFF
             S11(4) = S11(4) + (2.0 * RDN * (AL * RD2 - 4.0 * RD1**2 * RD2) + 4.0 * XNU * E1 * RD1 * RD2 + &
-                     AL * 2.0 * E2 * RD1**2 - FA * E2) * 2.0 * GE * F2 / (DE * RA**2) * OME(I) * XJ
+                     AL * 2.0 * E2 * RD1**2 - FA * E2) * 2.0 * GE * F2 / (DE * RA**2) * W_EFF
             S11(5) = S11(5) + (2.0 * RDN * (AL * RD1 + XNU * 2.0 * RD1 - 4.0 * RD1**3) + 4.0 * XNU * E1 * &
                      RD1**2 + AL * (2.0 * E1 * RD1**2 + 2.0 * E1) - FA * E1) * 2.0 * GE * F3 / (DE * RA**2) * &
-                     OME(I) * XJ
+                     W_EFF
             S11(6) = S11(6) + (2.0 * RDN * (AL * RD2 - 4.0 * RD1**2 * RD2) + 4.0 * XNU * E1 * RD1 * RD2 + &
-                     AL * 2.0 * E2 * RD1**2 - FA * E2) * 2.0 * GE * F3 / (DE * RA**2) * OME(I) * XJ
+                     AL * 2.0 * E2 * RD1**2 - FA * E2) * 2.0 * GE * F3 / (DE * RA**2) * W_EFF
 
             S12(1) = S12(1) + (2.0 * RDN * (XNU * RD2 - 4.0 * RD1**2 * RD2) + 2.0 * XNU * (E1 * RD2 * &
                      RD1 + E2 * RD1**2) + AL * (2.0 * E1 * RD1 * RD2 + E2)) * 2.0 * GE * F1 / &
-                     (DE * RA**2) * OME(I) * XJ
+                     (DE * RA**2) * W_EFF
             S12(2) = S12(2) + (2.0 * RDN * (XNU * RD1 - 4.0 * RD1 * RD2**2) + 2.0 * XNU * (E1 * RD2**2 + &
                      E2 * RD1 * RD2) + AL * (2.0 * E2 * RD1 * RD2 + E1)) * 2.0 * GE * F1 / &
-                     (DE * RA**2) * OME(I) * XJ
+                     (DE * RA**2) * W_EFF
             S12(3) = S12(3) + (2.0 * RDN * (XNU * RD2 - 4.0 * RD1**2 * RD2) + 2.0 * XNU * (E1 * RD2 * &
                      RD1 + E2 * RD1**2) + AL * (2.0 * E1 * RD1 * RD2 + E2)) * 2.0 * GE * F2 / &
-                     (DE * RA**2) * OME(I) * XJ
+                     (DE * RA**2) * W_EFF
             S12(4) = S12(4) + (2.0 * RDN * (XNU * RD1 - 4.0 * RD1 * RD2**2) + 2.0 * XNU * (E1 * RD2**2 + &
                      E2 * RD1 * RD2) + AL * (2.0 * E2 * RD1 * RD2 + E1)) * 2.0 * GE * F2 / &
-                     (DE * RA**2) * OME(I) * XJ
+                     (DE * RA**2) * W_EFF
             S12(5) = S12(5) + (2.0 * RDN * (XNU * RD2 - 4.0 * RD1**2 * RD2) + 2.0 * XNU * (E1 * RD2 * &
                      RD1 + E2 * RD1**2) + AL * (2.0 * E1 * RD1 * RD2 + E2)) * 2.0 * GE * F3 / &
-                     (DE * RA**2) * OME(I) * XJ
+                     (DE * RA**2) * W_EFF
             S12(6) = S12(6) + (2.0 * RDN * (XNU * RD1 - 4.0 * RD1 * RD2**2) + 2.0 * XNU * (E1 * RD2**2 + &
                      E2 * RD1 * RD2) + AL * (2.0 * E2 * RD1 * RD2 + E1)) * 2.0 * GE * F3 / &
-                     (DE * RA**2) * OME(I) * XJ
+                     (DE * RA**2) * W_EFF
 
             S22(1) = S22(1) + (2.0 * RDN * (AL * RD1 - 4.0 * RD1 * RD2**2) + 4.0 * XNU * E2 * RD1 * RD2 + &
-                     AL * 2.0 * E1 * RD2**2 - FA * E1) * 2.0 * GE * F1 / (DE * RA**2) * OME(I) * XJ
+                     AL * 2.0 * E1 * RD2**2 - FA * E1) * 2.0 * GE * F1 / (DE * RA**2) * W_EFF
             S22(2) = S22(2) + (2.0 * RDN * (AL * RD2 + 2.0 * XNU * RD2 - 4.0 * RD2**3) + 4.0 * XNU * E2 * &
                      RD2**2 + AL * (2.0 * E2 * RD2**2 + 2.0 * E2) - FA * E2) * 2.0 * GE * F1 / &
-                     (DE * RA**2) * OME(I) * XJ
+                     (DE * RA**2) * W_EFF
             S22(3) = S22(3) + (2.0 * RDN * (AL * RD1 - 4.0 * RD1 * RD2**2) + 4.0 * XNU * E2 * RD1 * RD2 + &
-                     AL * 2.0 * E1 * RD2**2 - FA * E1) * 2.0 * GE * F2 / (DE * RA**2) * OME(I) * XJ
+                     AL * 2.0 * E1 * RD2**2 - FA * E1) * 2.0 * GE * F2 / (DE * RA**2) * W_EFF
             S22(4) = S22(4) + (2.0 * RDN * (AL * RD2 + 2.0 * XNU * RD2 - 4.0 * RD2**3) + 4.0 * XNU * E2 * &
                      RD2**2 + AL * (2.0 * E2 * RD2**2 + 2.0 * E2) - FA * E2) * 2.0 * GE * F2 / &
-                     (DE * RA**2) * OME(I) * XJ
+                     (DE * RA**2) * W_EFF
             S22(5) = S22(5) + (2.0 * RDN * (AL * RD1 - 4.0 * RD1 * RD2**2) + 4.0 * XNU * E2 * RD1 * RD2 + &
-                     AL * 2.0 * E1 * RD2**2 - FA * E1) * 2.0 * GE * F3 / (DE * RA**2) * OME(I) * XJ
+                     AL * 2.0 * E1 * RD2**2 - FA * E1) * 2.0 * GE * F3 / (DE * RA**2) * W_EFF
             S22(6) = S22(6) + (2.0 * RDN * (AL * RD2 + 2.0 * XNU * RD2 - 4.0 * RD2**3) + 4.0 * XNU * E2 * &
                      RD2**2 + AL * (2.0 * E2 * RD2**2 + 2.0 * E2) - FA * E2) * 2.0 * GE * F3 / &
-                     (DE * RA**2) * OME(I) * XJ
+                     (DE * RA**2) * W_EFF
         end do
 
     end subroutine SIGMAEQ

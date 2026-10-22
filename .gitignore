@@ -6,3 +6,6 @@ __pycache__/
 .ipynb_checkpoints/
 calcula_tens_cont.m
 unbtex-example.pdf
+gh_elc.m
+sinhtrans.m
+SinhH_Transformation.pdf

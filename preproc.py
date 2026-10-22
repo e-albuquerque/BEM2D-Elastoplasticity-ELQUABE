@@ -366,7 +366,9 @@ def create_input_file(filename, computed_data, int_points, type_bcs, val_bcs, in
             f.write(f"{type_bcs[i, 5]} {val_bcs[i, 5]:.1f} \n")
 
         # 6. Internal Points Coordinates Line
-        int_points_str = " ".join(f"{nodes[p][0]:.1f}  {nodes[p][1]:.1f}" for p in int_points)
+        int_points_str = " ".join(
+            f"{format_coord(nodes[p][0])}  {format_coord(nodes[p][1])}" for p in int_points
+        )
         f.write(" " + int_points_str + "\n")
 
     print(f"Input file '{filename}' generated successfully.")
