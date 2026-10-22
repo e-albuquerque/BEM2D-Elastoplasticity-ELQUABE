@@ -133,22 +133,6 @@ def plot_validation(inp, out, save_path='result_plot.png'):
     print("=" * 78)
     print(f"Relative L2 Error in Vertical Displacement u_y      : {err_uy:.4e}")
     print(f"Relative L2 Error in von Mises Stress (All Nodes)   : {err_vm:.4e}")
-    print("-" * 78)
-    print("Boundary Nodes von Mises Stress (x, y, sigma_x, tau_xy, sigma_y, sigma_vM):")
-    for i in range(inp['n_bou']):
-        print(
-            f"  Node {i+1} ({bou_coords[i,0]:.2f}, {bou_coords[i,1]:.2f}): "
-            f"sx={stbou[i,0]: .2e}, txy={stbou[i,1]: .2e}, "
-            f"sy={stbou[i,2]:.6f}, vM={stbou[i,3]:.6f}"
-        )
-    print("-" * 78)
-    print("Internal Points von Mises Stress (x, y, sigma_x, tau_xy, sigma_y, sigma_vM):")
-    for k in range(inp['n_int']):
-        print(
-            f"  Point {k+1} ({int_coords[k,0]:.2f}, {int_coords[k,1]:.2f}): "
-            f"sx={stint[k,0]: .2e}, txy={stint[k,1]: .2e}, "
-            f"sy={stint[k,2]:.6f}, vM={stint[k,3]:.6f}"
-        )
     print("=" * 78)
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
