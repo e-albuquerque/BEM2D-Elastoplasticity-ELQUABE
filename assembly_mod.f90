@@ -9,15 +9,42 @@ module assembly_mod
     use data_mod
     implicit none
 
-    ! Standard 10-point Gauss-Legendre quadrature coordinates and weights
-    real, parameter :: GI(10) = [ &
-        0.9739065285, -0.9739065285,  0.8650633666, -0.8650633666, &
-        0.6794095683, -0.6794095682,  0.4333953941, -0.4333953941, &
-        0.1488743389, -0.1488743389 ]
-    real, parameter :: OME(10) = [ &
-        0.0666713443, 0.0666713443,  0.1494513491, 0.1494513491, &
-        0.2190863625, 0.2190863625,  0.2692667193, 0.2692667193, &
-        0.2955242247, 0.2955242247 ]
+    integer, parameter :: NPG = 20
+    real, parameter :: PI = 3.141592653589793
+
+    ! 20-point Gauss-Legendre quadrature coordinates and weights (for EXTINEQ and SIGMAEQ)
+    real, parameter :: GI(NPG) = [ &
+        -0.9931285991850950, -0.9639719272779138, &
+        -0.9122344282513259, -0.8391169718222188, &
+        -0.7463319064601508, -0.6360536807265150, &
+        -0.5108670019508271, -0.3737060887154195, &
+        -0.2277858511416451, -0.0765265211334973, &
+         0.0765265211334973,  0.2277858511416451, &
+         0.3737060887154195,  0.5108670019508271, &
+         0.6360536807265150,  0.7463319064601508, &
+         0.8391169718222188,  0.9122344282513259, &
+         0.9639719272779138,  0.9931285991850950 ]
+    real, parameter :: OME(NPG) = [ &
+         0.0176140071391509,  0.0406014298003864, &
+         0.0626720483341088,  0.0832767415767047, &
+         0.1019301198172407,  0.1181945319615186, &
+         0.1316886384491769,  0.1420961093183824, &
+         0.1491729864726042,  0.1527533871307263, &
+         0.1527533871307263,  0.1491729864726042, &
+         0.1420961093183824,  0.1316886384491769, &
+         0.1181945319615186,  0.1019301198172407, &
+         0.0832767415767047,  0.0626720483341088, &
+         0.0406014298003864,  0.0176140071391509 ]
+
+    ! 10-point standard Gauss quadrature (paired with 10-point logarithmic Gauss in LOCINEQ)
+    real, parameter :: GI10(10) = [ &
+        0.9739065285171717, -0.9739065285171717,  0.8650633666889845, -0.8650633666889845, &
+        0.6794095682990244, -0.6794095682990244,  0.4333953941292472, -0.4333953941292472, &
+        0.1488743389816312, -0.1488743389816312 ]
+    real, parameter :: OME10(10) = [ &
+        0.0666713443086881,  0.0666713443086881,  0.1494513491505806,  0.1494513491505806, &
+        0.2190863625159820,  0.2190863625159820,  0.2692667193099963,  0.2692667193099963, &
+        0.2955242247147529,  0.2955242247147529 ]
 
     ! 10-point logarithmic Gauss quadrature coordinates and weights
     real, parameter :: GIL(10) = [ &
@@ -41,8 +68,8 @@ contains
     subroutine GHMATEQ()
         implicit none
         real :: HW(2, 6), GW(2, 6), CH
-        real :: SF_G(10, 3), SF_GL(10, 6)
-        real :: XJA(10), ETA1(10), ETA2(10)
+        real :: SF_G(NPG, 3), SF_G10(10, 3), SF_GL(10, 6)
+        real :: XJA(NPG), ETA1(NPG), ETA2(NPG)
         real :: X1, Y1, X2, Y2, X3, Y3, A, B, C, D
         integer :: EL, I, J, K, LL, NODO
         integer :: NO1, NO2, NO3, NODE_LOC, DIR, NO_GLOB, COL_H, COL_G
@@ -52,16 +79,19 @@ contains
         G  = 0.0
         FI = 0.0
 
-        ! Precompute shape functions at all integration points (standard
-        ! Gauss and logarithmic Gauss) before starting the element and
-        ! collocation point loops
-        do I = 1, 10
-            ! Quadratic shape functions at standard Gauss points GI(I)
+        ! Precompute shape functions at 20 standard Gauss points (for EXTINEQ)
+        do I = 1, NPG
             SF_G(I, 1) = GI(I) * (GI(I) - 1.0) * 0.5
             SF_G(I, 2) = 1.0 - GI(I)**2
             SF_G(I, 3) = GI(I) * (GI(I) + 1.0) * 0.5
+        end do
 
-            ! Quadratic shape functions at logarithmic Gauss points GIL(I)
+        ! Precompute shape functions at 10 Gauss and logarithmic Gauss points (for LOCINEQ)
+        do I = 1, 10
+            SF_G10(I, 1) = GI10(I) * (GI10(I) - 1.0) * 0.5
+            SF_G10(I, 2) = 1.0 - GI10(I)**2
+            SF_G10(I, 3) = GI10(I) * (GI10(I) + 1.0) * 0.5
+
             ! Columns 1..3: extreme node singular transformation (NODO = 1 or 3)
             SF_GL(I, 1) = (GIL(I) - 1.0) * (2.0 * GIL(I) - 1.0)
             SF_GL(I, 2) = 4.0 * GIL(I) * (1.0 - GIL(I))
@@ -94,7 +124,7 @@ contains
             C = Y3 - 2.0 * Y2 + Y1
             D = (Y3 - Y1) / 2.0
 
-            do I = 1, 10
+            do I = 1, NPG
                 XJA(I)  = sqrt((GI(I) * A + B)**2 + (GI(I) * C + D)**2)
                 ETA1(I) =  (GI(I) * C + D) / XJA(I)
                 ETA2(I) = -(GI(I) * A + B) / XJA(I)
@@ -116,7 +146,7 @@ contains
                 if (NODO > 0) then
                     call EXTINEQ(X(LL), Y(LL), X1, Y1, X2, Y2, X3, Y3, &
                                  SF_G, XJA, ETA1, ETA2, NODO, HW, GW)
-                    call LOCINEQ(X1, Y1, X2, Y2, X3, Y3, SF_G, SF_GL, GW, NODO)
+                    call LOCINEQ(X1, Y1, X2, Y2, X3, Y3, SF_G10, SF_GL, GW, NODO)
                 else
                     call EXTINEQ(X(LL), Y(LL), X1, Y1, X2, Y2, X3, Y3, &
                                  SF_G, XJA, ETA1, ETA2, NODO, HW, GW)
@@ -232,7 +262,7 @@ contains
 
     !-------------------------------------------------------------------
     !> @brief Computes the HW and GW matrices that relate a source
-    !>        node (XP, YP) with a boundary element using 10-point
+    !>        node (XP, YP) with a boundary element using NPG-point
     !>        Gauss quadrature. When the source point does not belong to
     !>        the element (NODO == 0), applies the sinh transformation
     !>        to eliminate near-singularity errors.
@@ -240,7 +270,7 @@ contains
     subroutine EXTINEQ(XP, YP, X1, Y1, X2, Y2, X3, Y3, SF_G, XJA, ETA1, ETA2, NODO, HW, GW)
         implicit none
         real, intent(in)    :: XP, YP, X1, Y1, X2, Y2, X3, Y3
-        real, intent(in)    :: SF_G(10, 3), XJA(10), ETA1(10), ETA2(10)
+        real, intent(in)    :: SF_G(NPG, 3), XJA(NPG), ETA1(NPG), ETA2(NPG)
         integer, intent(in) :: NODO
         real, intent(out)   :: HW(2, 6), GW(2, 6)
 
@@ -252,7 +282,7 @@ contains
 
         HW = 0.0
         GW = 0.0
-        DE = 4.0 * 3.141592 * (1.0 - XNU)
+        DE = 4.0 * PI * (1.0 - XNU)
 
         if (NODO == 0) then
             A = X3 - 2.0 * X2 + X1
@@ -276,10 +306,10 @@ contains
             ! Projection point on the element and normalized distance b
             PSX    = N1G * X1 + N2G * X2 + N3G * X3
             PSY    = N1G * Y1 + N2G * Y2 + N3G * Y3
-            B_DIST = sqrt((PSX - XP)**2 + (PSY - YP)**2) / NORM_DELEM
+            B_DIST = 2.0 * sqrt((PSX - XP)**2 + (PSY - YP)**2) / NORM_DELEM
         end if
 
-        do I = 1, 10
+        do I = 1, NPG
             if (NODO == 0) then
                 ! Apply sinh transformation for non-singular / nearly-singular integration
                 call SINHTRANS(GI(I), EET, B_DIST, XI, JT)
@@ -405,13 +435,13 @@ contains
         A = A1**2 + A2**2
         B = 2.0 * (A1 * B1 + A2 * B2)
         C = B1**2 + B2**2
-        CONT1 = (3.0 - 4.0 * XNU) / (8.0 * 3.1415926 * GE * (1.0 - XNU))
+        CONT1 = (3.0 - 4.0 * XNU) / (8.0 * PI * GE * (1.0 - XNU))
         CONT2 = CONT1 / (3.0 - 4.0 * XNU)
 
         do I = 1, 10
-            T1 = ((A1 * GI(I) + B1)**2) / ((A2 * GI(I) + B2)**2 + (A1 * GI(I) + B1)**2)
-            T2 = ((A2 * GI(I) + B2)**2) / ((A2 * GI(I) + B2)**2 + (A1 * GI(I) + B1)**2)
-            T3 = (A1 * GI(I) + B1) * (A2 * GI(I) + B2) / ((A1 * GI(I) + B1)**2 + (A2 * GI(I) + B2)**2)
+            T1 = ((A1 * GI10(I) + B1)**2) / ((A2 * GI10(I) + B2)**2 + (A1 * GI10(I) + B1)**2)
+            T2 = ((A2 * GI10(I) + B2)**2) / ((A2 * GI10(I) + B2)**2 + (A1 * GI10(I) + B1)**2)
+            T3 = (A1 * GI10(I) + B1) * (A2 * GI10(I) + B2) / ((A1 * GI10(I) + B1)**2 + (A2 * GI10(I) + B2)**2)
 
             ! Precomputed shape functions at standard and logarithmic Gauss points
             F1   = SF_G(I, 1)
@@ -429,41 +459,41 @@ contains
             case (1)
                 XJA1 = sqrt((4.0 * A1 * GIL(I) - 2.0 * A1 + 0.5 * X3)**2 + &
                             (4.0 * A2 * GIL(I) - 2.0 * A2 + 0.5 * Y3)**2) * 2.0
-                XJA2 = sqrt((A1 * GI(I) * 2.0 + 0.5 * X3)**2 + (A2 * GI(I) * 2.0 + 0.5 * Y3)**2)
-                XLO  = -log(2.0 * sqrt((GI(I) * A1 + B1)**2 + (GI(I) * A2 + B2)**2))
-                S3   = CONT1 * (FL3 * XJA1 * OMEL(I) + F3 * XJA2 * XLO * OME(I))
-                S2   = CONT1 * (FL2 * XJA1 * OMEL(I) + F2 * XJA2 * XLO * OME(I))
-                S1   = CONT1 * (FL1 * XJA1 * OMEL(I) + F1 * XJA2 * XLO * OME(I))
+                XJA2 = sqrt((A1 * GI10(I) * 2.0 + 0.5 * X3)**2 + (A2 * GI10(I) * 2.0 + 0.5 * Y3)**2)
+                XLO  = -log(2.0 * sqrt((GI10(I) * A1 + B1)**2 + (GI10(I) * A2 + B2)**2))
+                S3   = CONT1 * (FL3 * XJA1 * OMEL(I) + F3 * XJA2 * XLO * OME10(I))
+                S2   = CONT1 * (FL2 * XJA1 * OMEL(I) + F2 * XJA2 * XLO * OME10(I))
+                S1   = CONT1 * (FL1 * XJA1 * OMEL(I) + F1 * XJA2 * XLO * OME10(I))
             case (2)
                 XJA1  = sqrt((0.5 * B1 - A1 * GIL(I))**2 + (0.5 * B2 - A2 * GIL(I))**2)
                 XJA11 = sqrt((0.5 * B1 + A1 * GIL(I))**2 + (0.5 * B2 + A2 * GIL(I))**2)
-                XJA2  = sqrt((0.5 * B1 + A1 * GI(I))**2  + (0.5 * B2 + A2 * GI(I))**2)
-                XLO   = -0.5 * log((GI(I) * A1 * 0.5 + B1 * 0.5)**2 + (GI(I) * A2 * 0.5 + B2 * 0.5)**2)
-                S3    = CONT1 * ((FLN1 * XJA1 + FLN3 * XJA11) * OMEL(I) + F3 * XJA2 * XLO * OME(I))
-                S2    = CONT1 * (FLN2 * (XJA1 + XJA11) * OMEL(I) + F2 * XJA2 * XLO * OME(I))
-                S1    = CONT1 * ((FLN3 * XJA1 + FLN1 * XJA11) * OMEL(I) + F1 * XJA2 * XLO * OME(I))
+                XJA2  = sqrt((0.5 * B1 + A1 * GI10(I))**2 + (0.5 * B2 + A2 * GI10(I))**2)
+                XLO   = -0.5 * log((GI10(I) * A1 * 0.5 + B1 * 0.5)**2 + (GI10(I) * A2 * 0.5 + B2 * 0.5)**2)
+                S3    = CONT1 * ((FLN1 * XJA1 + FLN3 * XJA11) * OMEL(I) + F3 * XJA2 * XLO * OME10(I))
+                S2    = CONT1 * (FLN2 * (XJA1 + XJA11) * OMEL(I) + F2 * XJA2 * XLO * OME10(I))
+                S1    = CONT1 * ((FLN3 * XJA1 + FLN1 * XJA11) * OMEL(I) + F1 * XJA2 * XLO * OME10(I))
             case (3)
                 XJA1 = sqrt((2.0 * A1 - 4.0 * A1 * GIL(I) - 0.5 * X1)**2 + &
                             (2.0 * A2 - 4.0 * A2 * GIL(I) - 0.5 * Y1)**2) * 2.0
-                XJA2 = sqrt((2.0 * A1 * GI(I) - 0.5 * X1)**2 + (2.0 * A2 * GI(I) - 0.5 * Y1)**2)
-                XLO  = -log(2.0 * sqrt((A1 * GI(I) + B1)**2 + (A2 * GI(I) + B2)**2))
-                S3   = CONT1 * (FL1 * XJA1 * OMEL(I) + F3 * XJA2 * XLO * OME(I))
-                S2   = CONT1 * (FL2 * XJA1 * OMEL(I) + F2 * XJA2 * XLO * OME(I))
-                S1   = CONT1 * (FL3 * XJA1 * OMEL(I) + F1 * XJA2 * XLO * OME(I))
+                XJA2 = sqrt((2.0 * A1 * GI10(I) - 0.5 * X1)**2 + (2.0 * A2 * GI10(I) - 0.5 * Y1)**2)
+                XLO  = -log(2.0 * sqrt((A1 * GI10(I) + B1)**2 + (A2 * GI10(I) + B2)**2))
+                S3   = CONT1 * (FL1 * XJA1 * OMEL(I) + F3 * XJA2 * XLO * OME10(I))
+                S2   = CONT1 * (FL2 * XJA1 * OMEL(I) + F2 * XJA2 * XLO * OME10(I))
+                S1   = CONT1 * (FL3 * XJA1 * OMEL(I) + F1 * XJA2 * XLO * OME10(I))
             end select
 
-            GW(1, 5) = GW(1, 5) + S3 + CONT2 * F3 * T1 * XJA2 * OME(I)
-            GW(1, 3) = GW(1, 3) + S2 + CONT2 * F2 * T1 * XJA2 * OME(I)
-            GW(1, 1) = GW(1, 1) + S1 + CONT2 * F1 * T1 * XJA2 * OME(I)
-            GW(1, 6) = GW(1, 6) + CONT2 * T3 * XJA2 * F3 * OME(I)
-            GW(1, 4) = GW(1, 4) + CONT2 * T3 * XJA2 * F2 * OME(I)
-            GW(1, 2) = GW(1, 2) + CONT2 * T3 * XJA2 * F1 * OME(I)
+            GW(1, 5) = GW(1, 5) + S3 + CONT2 * F3 * T1 * XJA2 * OME10(I)
+            GW(1, 3) = GW(1, 3) + S2 + CONT2 * F2 * T1 * XJA2 * OME10(I)
+            GW(1, 1) = GW(1, 1) + S1 + CONT2 * F1 * T1 * XJA2 * OME10(I)
+            GW(1, 6) = GW(1, 6) + CONT2 * T3 * XJA2 * F3 * OME10(I)
+            GW(1, 4) = GW(1, 4) + CONT2 * T3 * XJA2 * F2 * OME10(I)
+            GW(1, 2) = GW(1, 2) + CONT2 * T3 * XJA2 * F1 * OME10(I)
             GW(2, 5) = GW(1, 6)
             GW(2, 3) = GW(1, 4)
             GW(2, 1) = GW(1, 2)
-            GW(2, 6) = GW(2, 6) + S3 + CONT2 * T2 * XJA2 * F3 * OME(I)
-            GW(2, 4) = GW(2, 4) + S2 + CONT2 * T2 * XJA2 * F2 * OME(I)
-            GW(2, 2) = GW(2, 2) + S1 + CONT2 * T2 * XJA2 * F1 * OME(I)
+            GW(2, 6) = GW(2, 6) + S3 + CONT2 * T2 * XJA2 * F3 * OME10(I)
+            GW(2, 4) = GW(2, 4) + S2 + CONT2 * T2 * XJA2 * F2 * OME10(I)
+            GW(2, 2) = GW(2, 2) + S1 + CONT2 * T2 * XJA2 * F1 * OME10(I)
         end do
 
     end subroutine LOCINEQ
@@ -478,8 +508,8 @@ contains
         implicit none
         real :: HW(2, 6), GW(2, 6)
         real :: D11(6), D12(6), D22(6), S11(6), S12(6), S22(6)
-        real :: SF_G(10, 3)
-        real :: XJA_EL(NE, 10), ETA1_EL(NE, 10), ETA2_EL(NE, 10)
+        real :: SF_G(NPG, 3)
+        real :: XJA_EL(NE, NPG), ETA1_EL(NE, NPG), ETA2_EL(NE, NPG)
         real :: A, B, C, D
         real :: CH, SX, TXY, SY
         integer :: EL, I, J, K
@@ -518,7 +548,7 @@ contains
         if (L == 0) return
 
         ! Precompute shape functions at Gauss points
-        do I = 1, 10
+        do I = 1, NPG
             SF_G(I, 1) = GI(I) * (GI(I) - 1.0) * 0.5
             SF_G(I, 2) = 1.0 - GI(I)**2
             SF_G(I, 3) = GI(I) * (GI(I) + 1.0) * 0.5
@@ -533,7 +563,7 @@ contains
             B = (X(NO3) - X(NO1)) / 2.0
             C = Y(NO3) - 2.0 * Y(NO2) + Y(NO1)
             D = (Y(NO3) - Y(NO1)) / 2.0
-            do I = 1, 10
+            do I = 1, NPG
                 XJA_EL(EL, I)  = sqrt((GI(I) * A + B)**2 + (GI(I) * C + D)**2)
                 ETA1_EL(EL, I) =  (GI(I) * C + D) / XJA_EL(EL, I)
                 ETA2_EL(EL, I) = -(GI(I) * A + B) / XJA_EL(EL, I)
@@ -738,7 +768,7 @@ contains
         B  = (X3 - X1) / 2.0
         C  = Y3 - 2.0 * Y2 + Y1
         D  = (Y3 - Y1) / 2.0
-        DE = 4.0 * 3.141592 * (1.0 - XNU)
+        DE = 4.0 * PI * (1.0 - XNU)
 
         DX_EL       = X3 - X1
         DY_EL       = Y3 - Y1
@@ -756,9 +786,9 @@ contains
         ! Projection point on the element and normalized distance b
         PSX    = N1G * X1 + N2G * X2 + N3G * X3
         PSY    = N1G * Y1 + N2G * Y2 + N3G * Y3
-        B_DIST = sqrt((PSX - XP)**2 + (PSY - YP)**2) / NORM_DELEM
+        B_DIST = 2.0 * sqrt((PSX - XP)**2 + (PSY - YP)**2) / NORM_DELEM
 
-        do I = 1, 10
+        do I = 1, NPG
             ! Apply sinh transformation for nearly-singular integration
             call SINHTRANS(GI(I), EET, B_DIST, XI, JT)
             F1    = 0.5 * XI * (XI - 1.0)
