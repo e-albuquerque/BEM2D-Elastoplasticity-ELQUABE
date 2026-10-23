@@ -148,10 +148,17 @@ def compute_inodes(file_name, bound_cond):
     }
 
 
-def mount_bcs(segments, bc_info):
+def mount_bcs(segments, bc_info, elements=None, coordinates=None):
     """
     Constructs boundary condition type (`KODE`) and value (`DFI`) arrays
     for each 3-node quadratic boundary element (6 DOFs per element).
+
+    Supports:
+      * type_x, type_y in (0, 1): Prescribed displacement (0) or traction (1)
+        in global (x, y) coordinates.
+      * type_x == 2: Prescribed normal traction/pressure (value_x = t_n) along
+        the boundary, which is decomposed at each quadratic element node into
+        global (t_x, t_y) traction components (type = 1 in both x and y).
     """
     num_elements = len(segments)
     type_bcs = np.zeros((num_elements, 6), dtype=np.int64)
@@ -164,8 +171,39 @@ def mount_bcs(segments, bc_info):
                 vl_x = bc_data['value_x']
                 tp_y = bc_data['type_y']
                 vl_y = bc_data['value_y']
-                type_bcs[i, :] = np.array([tp_x, tp_y, tp_x, tp_y, tp_x, tp_y])
-                val_bcs[i, :] = np.array([vl_x, vl_y, vl_x, vl_y, vl_x, vl_y])
+
+                if tp_x == 2:
+                    if elements is None or coordinates is None:
+                        raise ValueError(
+                            "elements and coordinates are required in mount_bcs when type_x == 2."
+                        )
+                    # Local BEM node ordering: node1 (xi=-1), node2 (xi=0), node3 (xi=+1)
+                    n1, n3, n2 = int(elements[i, 0]), int(elements[i, 1]), int(elements[i, 2])
+                    x1, y1 = coordinates[n1, 0], coordinates[n1, 1]
+                    x2, y2 = coordinates[n2, 0], coordinates[n2, 1]
+                    x3, y3 = coordinates[n3, 0], coordinates[n3, 1]
+
+                    for j, xi in enumerate((-1.0, 0.0, 1.0)):
+                        dn1 = xi - 0.5
+                        dn2 = -2.0 * xi
+                        dn3 = xi + 0.5
+
+                        dxdxi = dn1 * x1 + dn2 * x2 + dn3 * x3
+                        dydxi = dn1 * y1 + dn2 * y2 + dn3 * y3
+                        jac = np.hypot(dxdxi, dydxi)
+
+                        # Outward unit normal vector (nx, ny)
+                        nx = dydxi / jac
+                        ny = -dxdxi / jac
+
+                        # Decompose normal traction vl_x into global x and y tractions
+                        type_bcs[i, 2 * j] = 1
+                        type_bcs[i, 2 * j + 1] = 1
+                        val_bcs[i, 2 * j] = vl_x * nx
+                        val_bcs[i, 2 * j + 1] = vl_x * ny
+                else:
+                    type_bcs[i, :] = np.array([tp_x, tp_y, tp_x, tp_y, tp_x, tp_y])
+                    val_bcs[i, :] = np.array([vl_x, vl_y, vl_x, vl_y, vl_x, vl_y])
                 break
 
     return type_bcs, val_bcs
@@ -314,10 +352,21 @@ def show_geometry(coord, xplot, yplot, elem, tri6, type_bcs, val_bcs, save_path=
 
 
 def format_coord(val):
-    val_rounded = round(val, 4)
+    val_rounded = round(float(val), 8)
+    if abs(val_rounded) < 1e-12:
+        return "0."
     if val_rounded.is_integer():
         return f"{int(val_rounded)}."
-    return f"{val_rounded}"
+    return f"{val_rounded:.8f}".rstrip('0')
+
+
+def format_bc_val(val):
+    val_rounded = round(float(val), 8)
+    if abs(val_rounded) < 1e-12:
+        return "0.0"
+    if val_rounded.is_integer():
+        return f"{val_rounded:.1f}"
+    return f"{val_rounded:.8f}".rstrip('0')
 
 
 def create_input_file(filename, computed_data, int_points, type_bcs, val_bcs, input_params):
@@ -341,7 +390,7 @@ def create_input_file(filename, computed_data, int_points, type_bcs, val_bcs, in
         poisson_ratio = input_params['nu']
 
         # 2. Basic Parameter Line: NE, L, GE, XNU
-        f.write(f" {num_elements},{num_internal_points},        {shear_modulus:.1f},{poisson_ratio:.2f}\n")
+        f.write(f" {num_elements},{num_internal_points},        {shear_modulus:.12g},{poisson_ratio:.4f}\n")
 
         # 3. Boundary Nodes Coordinates Line
         node_coords_list = []
@@ -358,12 +407,12 @@ def create_input_file(filename, computed_data, int_points, type_bcs, val_bcs, in
 
         # 5. Boundary Conditions Lines (6 pairs of KODE, DFI per element)
         for i in range(num_elements):
-            f.write(f"{type_bcs[i, 0]} {val_bcs[i, 0]:.1f} ")
-            f.write(f"{type_bcs[i, 1]} {val_bcs[i, 1]:.1f} ")
-            f.write(f"{type_bcs[i, 2]} {val_bcs[i, 2]:.1f} ")
-            f.write(f"{type_bcs[i, 3]} {val_bcs[i, 3]:.1f} ")
-            f.write(f"{type_bcs[i, 4]} {val_bcs[i, 4]:.1f} ")
-            f.write(f"{type_bcs[i, 5]} {val_bcs[i, 5]:.1f} \n")
+            f.write(f"{type_bcs[i, 0]} {format_bc_val(val_bcs[i, 0])} ")
+            f.write(f"{type_bcs[i, 1]} {format_bc_val(val_bcs[i, 1])} ")
+            f.write(f"{type_bcs[i, 2]} {format_bc_val(val_bcs[i, 2])} ")
+            f.write(f"{type_bcs[i, 3]} {format_bc_val(val_bcs[i, 3])} ")
+            f.write(f"{type_bcs[i, 4]} {format_bc_val(val_bcs[i, 4])} ")
+            f.write(f"{type_bcs[i, 5]} {format_bc_val(val_bcs[i, 5])} \n")
 
         # 6. Internal Points Coordinates Line
         int_points_str = " ".join(
@@ -377,7 +426,12 @@ def create_input_file(filename, computed_data, int_points, type_bcs, val_bcs, in
 if __name__ == '__main__':
     inp_data = input_data()
     computed_data = compute_inodes(inp_data['file_name'], inp_data['bound_cond'])
-    type_bcs, val_bcs = mount_bcs(computed_data['segments'], computed_data['bc_info'])
+    type_bcs, val_bcs = mount_bcs(
+        computed_data['segments'],
+        computed_data['bc_info'],
+        computed_data['elements'],
+        computed_data['coordinates'],
+    )
     xplot, yplot = comp_xyplot(computed_data['elements'], computed_data['coordinates'])
     show_geometry(
         computed_data['coordinates'],

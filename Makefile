@@ -7,6 +7,12 @@ FFLAGS  = -fopenmp -O3 -fdefault-real-8 -Wall -Wextra
 LIBS    = -llapack -lblas
 TARGET  = elquabe_modern.exe
 
+ifeq ($(OS),Windows_NT)
+    LDFLAGS = -static
+else
+    LDFLAGS =
+endif
+
 OBJS    = data_mod.o io_mod.o assembly_mod.o solver_mod.o main.o
 
 .PHONY: all clean run
@@ -14,7 +20,7 @@ OBJS    = data_mod.o io_mod.o assembly_mod.o solver_mod.o main.o
 all: $(TARGET)
 
 $(TARGET): $(OBJS)
-	$(FC) $(FFLAGS) -o $(TARGET) $(OBJS) $(LIBS)
+	$(FC) $(FFLAGS) $(LDFLAGS) -o $(TARGET) $(OBJS) $(LIBS)
 
 data_mod.o: data_mod.f90
 	$(FC) $(FFLAGS) -c data_mod.f90

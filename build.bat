@@ -8,7 +8,7 @@ if exist "C:\msys64\ucrt64\bin" (
 )
 
 echo Compiling Modernized ELQUABE...
-gfortran -fopenmp -O3 -fdefault-real-8 -Wall -Wextra ^
+gfortran -fopenmp -O3 -fdefault-real-8 -Wall -Wextra -static ^
     data_mod.f90 io_mod.f90 assembly_mod.f90 solver_mod.f90 main.f90 ^
     -o elquabe_modern.exe -llapack -lblas
 
