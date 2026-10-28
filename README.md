@@ -1,99 +1,160 @@
-# Modernized BEM for Elastostatics (ELQUABE)
+# Modernized 2D Elastoplastic BEM (ELQUABE-EP2D)
 
-This repository contains a modernized Fortran 90 implementation of the **ELQUABE** program, originally developed by Brebbia and Dominguez in their classic textbook *Boundary Elements: An Introductory Course*.
+This repository contains a modernized Fortran 90 implementation of the **2D Elastoplastic Boundary Element Method (BEM)**, combining the quadratic boundary element architecture of **ELQUABE** (*Brebbia & Dominguez, 1992*) with the 2D initial-stress elastoplastic domain-cell formulation of **BEMECH** (*Gao & Davies, 2001*).
 
-The program uses the **Boundary Element Method (BEM)** with quadratic boundary elements to solve 2D (plane) elastostatic problems.
+The solver models two-dimensional (**Plane Strain** and **Plane Stress**) elastic and elastoplastic problems using 3-node quadratic boundary elements (`line3`) and 6-node triangular (`triangle6`) or 8-node serendipity quadrilateral (`quad8`) internal cells.
 
-## 🚀 Modernization Features
+---
 
-The original Fortran 77 codebase has been fully refactored to meet modern high-performance computing standards:
+## 🔄 Program Architecture & Workflow
 
-1. **Free-Form & Modular Architecture**: The monolithic code was split into clean F90 modules (`data_mod`, `io_mod`, `assembly_mod`, `solver_mod`), eliminating all legacy `COMMON` blocks, arithmetic `IF`s, and computed `GOTO`s, while enabling strict compiler type checking (`IMPLICIT NONE`).
-2. **Dynamic Memory Allocation & Explicit Connectivity**: Static limitations (e.g., fixed dimensions `NX=100`, `NX1=150` and single-loop implicit node numbering) were completely removed. The program now reads the exact number of boundary elements, internal points, and the **element connectivity matrix** (`CONEC`) from the input file, dynamically allocating arrays (`ALLOCATABLE`) and enabling the modeling of multiply-connected domains (e.g., plates with holes or internal cavities).
-3. **OpenMP Parallelization & Loop/Quadrature Optimization**: The heavy matrix integration and assembly routines (`GHMATEQ` and `INTEREQ`) that build the $G$ and $H$ matrices and evaluate internal points are parallelized with OpenMP and optimized to eliminate redundant calculations:
-   - Quadratic shape functions at all standard Gauss points (`SF_G`) and logarithmic Gauss points (`SF_GL`) are precomputed once into matrices before the integration loops and passed into `EXTINEQ`, `LOCINEQ`, and `SIGMAEQ`.
-   - In `GHMATEQ`, the assembly loops are ordered with the **boundary element loop on the outside** and the **collocation (source) point loop on the inside**, allowing the element Jacobians (`XJA`) and outward unit normal vectors (`ETA1`, `ETA2`) to be computed only once per element instead of being recalculated for every collocation point.
-4. **LAPACK Solver Integration**: The native manual Gaussian elimination solver (`SLNPD`) was replaced with LAPACK's highly optimized `DGESV` (Double-precision Real General Linear Equation Solver) for superior performance and numerical stability in large systems.
-5. **Double Precision Upgrade**: The solver inherently enforces **64-bit double precision** using compiler flags (`-fdefault-real-8`), promoting all `REAL` variables to `REAL*8` (`real64`), guaranteeing highly precise numerical integration.
-6. **Near-Singularity Treatment via $\sinh$ Transformation**: For collocation or internal points located very close to a boundary element (where the source point does not belong to the element), `EXTINEQ` and `SIGMAEQ` apply the nonlinear hyperbolic sine ($\sinh$) coordinate transformation (`SINHTRANS`, Johnston & Elliott, 2005), clustering Gauss points around the projection of the source point and eliminating near-singularity errors on refined meshes.
-7. **Boundary Stress & von Mises Recovery**: The original `ELQUABE` code only evaluated the full stress tensor at internal points (`SIGMAEQ`), outputting only tractions on the boundary. The modernized solver implements `BOUND_STRESS` and `CALC_DFFORMA` to recover the complete Cauchy stress tensor ($\sigma_x, \tau_{xy}, \sigma_y$) and the **von Mises equivalent stress** ($\sigma_{\text{vM}}$) at all boundary nodes using tangential derivatives of the quadratic shape functions and Hooke's law in local normal–tangential coordinates.
-8. **Python Pre/Post-Processing, Multi-Problem Support & VTK Export**: Python scripts (`input_data.py`, `preproc.py`, and `posproc.py`) integrate with Gmsh (`meshio`), support multiple benchmark problems (e.g., quarter cylinder under internal pressure and square plate under uniaxial traction), automatically decompose normal pressure boundary conditions (`type_x = 2`) into global $(x, y)$ traction components at each quadratic node, plot geometries and boundary conditions (`geometry.png`), validate numerical results against the corresponding analytical elastostatic solutions, export `.vtk` files for ParaView, and generate 2D domain contour maps of displacements and von Mises stresses.
-9. **Colab Ready**: A self-contained Jupyter Notebook (`Run_elquabe_on_Colab.ipynb`) is included to run the entire pipeline in Google Colab.
+### 1. Global Program Flowchart (`ELQUABE`)
+
+![2D Elastoplastic BEM Flowchart](diagrama_graphviz.png)
+
+### 2. Detailed Non-Linear Elastoplastic Execution (`NL_COEFS` & `NL_SOLVE`)
+
+![Detailed 2D Non-Linear Elastoplastic Flowchart](diagrama_nl_graphviz.png)
+
+---
+
+## 🚀 Key Features
+
+1. **2D Initial-Stress Elastoplastic BEM Formulation**:
+   - Solves the Somigliana boundary and interior displacement/stress integral equations coupled with domain integrals of the initial plastic stress tensor $\sigma_{ij}^p$:
+     $$\mathbf{A}_b \Delta \mathbf{X}_b = \mathbf{E}_b \Delta \boldsymbol{\sigma}^p, \qquad \Delta \mathbf{u}_{\text{int}} = \mathbf{A}_u \Delta \mathbf{X}_b + \mathbf{E}_u \Delta \boldsymbol{\sigma}^p, \qquad \Delta \boldsymbol{\sigma}^e = \mathbf{A}_\sigma \Delta \mathbf{X}_b + \mathbf{E}_\sigma \Delta \boldsymbol{\sigma}^p$$
+   - Eliminates boundary unknowns in memory via $\mathbf{A}_c = \mathbf{A}_b^{-1} \mathbf{E}_b$ (`SLNPD_MULTI` using LAPACK `DGESV`), forming the coupled plastic influence matrices $\mathbf{E}_{ui} = \mathbf{E}_u + \mathbf{A}_u \mathbf{A}_c$ and $\mathbf{E} = \mathbf{E}_\sigma + \mathbf{A}_\sigma \mathbf{A}_c$.
+   - Supports **Plane Strain (`NSIG = 4`)** and **Plane Stress (`NSIG = 3`)**.
+
+2. **Quadratic Internal Domain Cells (`NODC = 6` and `NODC = 8`)**:
+   - Supports **6-node quadratic triangular cells (`triangle6`)** and **8-node quadratic quadrilateral cells (`quad8`)**.
+   - **Regular & Nearly-Singular Cells (`ADAPTINT_CELL_2D`)**: Distance-based adaptive Gauss-Legendre quadrature order selection (`CHOSEGP_1D`) with automatic uniform sub-triangle ($N_{\text{sub}}^2$) or sub-quadrilateral subdivision.
+   - **Singular Cells (`SIN_CELL_2D` & `CELL_BOUND_2D`)**: Polar/Duffy degenerate sub-element coordinate transformation for weakly singular $E_{ijk}$ kernels (`NTU = 4`) and strongly singular Cauchy principal value $E_{ijkl}$ kernels (`NTU = 5`) combined with analytical free terms $F_{ijkl}$ and outer cell-side line integrals.
+
+3. **Natural Corner Traction Discontinuity Without Duplicate Nodes**:
+   - Unlike legacy codes that require duplicate corner nodes (`MULTP`), this code retains the element-wise traction vector `DFI(6*NE)` and explicit boundary element connectivity `CONEC(NE, 3)`, naturally handling traction discontinuities at geometric corners while maintaining a single unique set of boundary nodes (`1..N`) and internal nodes (`N+1..N+L`).
+
+4. **General Yield Criteria & Hardening Laws**:
+   - Built-in support for four classical yield criteria (`PL_FLOW` & `DF_DSIG`):
+     - `NCRIT = 1`: **Tresca**
+     - `NCRIT = 2`: **von Mises**
+     - `NCRIT = 3`: **Mohr–Coulomb**
+     - `NCRIT = 4`: **Drucker–Prager**
+   - Supports elastic–perfectly plastic materials as well as isotropic hardening (`HARDI`), kinematic hardening (`HARDK` with back-stress tensor `BACKS`), and mixed hardening (`EM`).
+
+5. **OpenMP Parallelization & In-Memory Linear Algebra**:
+   - Boundary matrix assembly (`GHMATEQ`), internal point evaluation (`INTEREQ`), and 2D domain cell integration (`INT_CELL_2D`) are parallelized with **OpenMP**.
+   - All influence matrices ($\mathbf{A}_b, \mathbf{A}_u, \mathbf{A}_\sigma, \mathbf{E}_b, \mathbf{E}_u, \mathbf{E}_\sigma, \mathbf{A}_c, \mathbf{E}_{ui}, \mathbf{E}$) are stored directly in RAM (zero scratch-disk I/O overhead).
+   - Enforces **64-bit double precision** (`-fdefault-real-8`) and uses **LAPACK (`DGESV`)** for both single-RHS and multi-RHS linear systems.
+
+6. **Near-Singularity Treatment & Boundary Stress Recovery**:
+   - Hyperbolic sine ($\sinh$) coordinate transformation (`SINHTRANS`, *Johnston & Elliott, 2005*) for nearly-singular boundary integrals.
+   - Full Cauchy stress tensor ($\sigma_x, \tau_{xy}, \sigma_y, \sigma_z$) and initial plastic stress coupling (`BSCOEF`, `PBSCOEF`) recovered directly on boundary nodes via local normal–tangential shape function derivatives.
+
+7. **Python Pre/Post-Processing, Analytical Lamé–Hill Validation & VTK Export**:
+   - `input_data.py` & `preproc.py`: Read Gmsh quadratic meshes (`.msh`) via `meshio`, map boundary and internal cell connectivities, decompose normal boundary pressures (`type_x = 2`) into global nodal tractions, plot the mesh and boundary conditions (`geometry.png`), and generate `eq12cb.dat`.
+   - `posproc.py`: Compares numerical BEM results against the **analytical elastoplastic Lamé–Hill solution** for a thick-walled cylinder under internal pressure (`result_plot.png`), exports `.vtk` files (`resultado_elquabe.vtk`) for ParaView, and generates 2D contour maps of radial displacement (`displacement_map.png`), von Mises equivalent stress (`von_mises_map.png`), and equivalent plastic strain (`plastic_strain_map.png`).
+
+---
 
 ## 📂 Project Structure
 
 ### Fortran Source Code
-- `main.f90`: Main program entry point.
-- `data_mod.f90`: Global variable declarations, element connectivity matrix (`CONEC`), and dynamic array allocations (`allocate_arrays`, `deallocate_arrays`).
-- `assembly_mod.f90`: Connectivity-driven BEM influence matrices integration, assembly, near-singular $\sinh$ transformation (`SINHTRANS`), and boundary/internal stress recovery (`GHMATEQ`, `EXTINEQ`, `LOCINEQ`, `INTEREQ`, `BOUND_STRESS`, `CALC_DFFORMA`, `SIGMAEQ`).
-- `io_mod.f90`: Input/Output routines (`INPUTEQ`, `OUTPTEQ`), reading boundary node coordinates, element connectivity (`CONEC`), boundary conditions, and internal points.
-- `solver_mod.f90`: System of equations solver wrapper for LAPACK (`DGESV`).
-- `elquabe.for`: Original legacy Fortran 77 source code kept for reference.
+- `main.f90`: Main program entry point (`INPUTEQ` $\rightarrow$ `GHMATEQ` $\rightarrow$ `SLNPD` $\rightarrow$ `INTEREQ` $\rightarrow$ `NL_COEFS` $\rightarrow$ `NL_SOLVE` $\rightarrow$ `OUTPTEQ`).
+- `data_mod.f90`: Global variable declarations, boundary and cell connectivity arrays (`CONEC`, `LNDC`), elastoplastic state arrays (`ESTRS`, `BACKS`, `EPSTN`, `DFDS`), influence matrices, and dynamic memory management (`allocate_arrays`, `allocate_plastic_arrays`, `deallocate_arrays`).
+- `io_mod.f90`: Input/Output routines (`INPUTEQ`, `OUTPTEQ`), reading boundary elements, internal points, 2D internal cells (`NODC = 6` or `8`), and plasticity parameters, and exporting results.
+- `assembly_mod.f90`: Elastic boundary integration (`GHMATEQ`, `EXTINEQ`, `LOCINEQ`, `INTEREQ`, `SIGMAEQ`), 2D domain cell integration (`NL_COEFS`, `INT_CELL_2D`, `ADAPTINT_CELL_2D`, `SIN_CELL_2D`, `CELL_BOUND_2D`, `EVAL_KE_2D`), and incremental-iterative elastoplastic solver (`NL_SOLVE`, `FORM_PLASTIC_MATRICES`, `P_M_ITER`, `SIG_SCALE`, `SIGCROSS`, `PL_FLOW`, `DF_DSIG`, `DF_MATRX`, `UPDATEV`).
+- `solver_mod.f90`: LAPACK `DGESV` wrappers for single-RHS (`SLNPD`) and multi-RHS (`SLNPD_MULTI`) systems.
+
+### Python Scripts & Mesh Files
+- `input_data.py`: Problem configuration, elastic properties ($E, \nu$), boundary conditions, and plasticity dictionary (`nsig`, `tolgp`, `nauto`, `ncrit`, `uniax`, `frict`, `hardi`, `hardk`, `em`, `nincs`, `fincr`, `miter`, `toler`).
+- `preproc.py`: Gmsh mesh reader, cell connectivity mapper, boundary condition builder, and `eq12cb.dat` generator.
+- `posproc.py`: Analytical Lamé–Hill elastoplastic cylinder validation, error computation, VTK exporter, and 2D contour plotter.
+- `fluxogram.py`: Graphviz script that generates the program workflow diagram (`diagrama_graphviz.png`).
+- `placa.geo` / `placa.msh`: Gmsh geometry and quadratic mesh (`50` `line3` boundary elements, `459` internal nodes, and `254` `triangle6` internal cells) for the quarter thick-walled cylinder under internal pressure.
 
 ### Output Data Files
-- `eq12cb.out`: Formatted general report (mesh, boundary conditions, boundary displacements, tractions, boundary stresses, and internal displacements/stresses).
+- `eq12cb.out`: Complete formatted report (mesh, boundary conditions, cell connectivity, plasticity convergence log, nodal displacements, tractions, stresses, and equivalent plastic strains).
 - `dpbou.dat` / `dpint.dat`: Boundary and internal nodal displacements (`u_x`, `u_y`, `|u|`).
-- `stbou.dat` / `stint.dat`: Boundary and internal nodal stresses in 4 columns (`sigma_x`, `tau_xy`, `sigma_y`, `sigma_vm`).
+- `stbou.dat` / `stint.dat`: Boundary and internal nodal stresses and plastic strains in 5 columns (`sigma_x`, `tau_xy`, `sigma_y`, `sigma_vm`, `epstn`).
+- `resultado_elquabe.vtk`: VTK unstructured grid with nodal vector/scalar fields (`Displacement`, `Sigma_X`, `Tau_XY`, `Sigma_Y`, `Von_Mises_Stress`, `Equivalent_Plastic_Strain`).
 
-### Python Tools, Mesh & Validation
-- `input_data.py`: Problem selector and configuration (`problem=1` for quarter cylinder under internal pressure using `placa.msh`; `problem=2` for square plate under uniaxial traction using `placa2.msh`), material properties ($E, \nu$), and boundary conditions (`0` = prescribed displacement, `1` = prescribed traction, `2` = normal pressure along the boundary).
-- `placa.geo` / `placa.msh`: Gmsh geometry and quadratic mesh (`line3` and `triangle6`) for the one-quarter thick-walled cylinder under internal pressure.
-- `placa2.geo` / `placa2.msh`: Gmsh geometry and quadratic mesh (`line3` and `triangle6`) for the square plate under uniaxial traction.
-- `preproc.py`: Reads Gmsh `.msh` files via `meshio`, decomposes normal boundary pressures (`type_x = 2`) into global $(t_x, t_y)$ nodal tractions using the quadratic shape function outward normals, plots the mesh and boundary conditions (`geometry.png`), and exports the solver input file (`eq12cb.dat`).
-- `posproc.py`: Reads the exported boundary/internal displacements and stresses, automatically selects and compares against the analytical solution for the active problem (`result_plot.png`), exports VTK data (`resultado_elquabe.vtk`), and plots 2D domain contour maps of displacement (`displacement_map.png`) and von Mises equivalent stress (`von_mises_map.png`).
-- `Run_elquabe_on_Colab.ipynb`: Google Colab notebook for running the preprocessing, compiling the BEM code, and executing the analytical validation and contour plotting entirely in the cloud.
-
-### Build Scripts
-- `Makefile` / `build.bat`: Build scripts for Linux and Windows/MSYS2 environments.
+---
 
 ## ⚙️ Compilation & Build
 
 ### Requirements
-- **GFortran** (GCC)
+- **GFortran** (GCC) with **OpenMP** (`libgomp`)
 - **LAPACK & BLAS** libraries
-- **OpenMP** (`libgomp`)
+- **Python 3** with `numpy`, `scipy`, `matplotlib`, `meshio`, and `graphviz`
 
-If you are using Windows with MSYS2 (`UCRT64`), ensure the dependencies are installed:
+On Windows with MSYS2 (`UCRT64`):
 ```bash
-pacman -S mingw-w64-ucrt-x86_64-gcc-fortran mingw-w64-ucrt-x86_64-lapack mingw-w64-ucrt-x86_64-make
+pacman -S mingw-w64-ucrt-x86_64-gcc-fortran mingw-w64-ucrt-x86_64-lapack mingw-w64-ucrt-x86_64-make mingw-w64-ucrt-x86_64-graphviz
 ```
 
 ### Building the Executable
-Navigate to the repository folder and run:
-```bash
-make
+Run `build.bat` on Windows or `make` on Linux/MSYS2:
+```powershell
+.\build.bat
 ```
-*(Or `mingw32-make` / `.\build.bat` on Windows)*. This invokes `gfortran` with `-fopenmp -O3 -fdefault-real-8 -Wall -Wextra` and links against `-llapack -lblas` to produce `elquabe_modern.exe`.
+This compiles `data_mod.f90`, `io_mod.f90`, `solver_mod.f90`, `assembly_mod.f90`, and `main.f90` with `-fopenmp -O3 -fdefault-real-8 -Wall -Wextra -static` and links against `-llapack -lblas` to generate `elquabe_modern.exe`.
+
+---
 
 ## 🏃 Usage & Validation Pipeline
 
-1. **Select the Problem & Preprocess**: In `input_data.py`, set `problem=1` (Quarter Cylinder under Internal Pressure, `placa.msh`) or `problem=2` (Square Plate under Uniaxial Traction, `placa2.msh`). If generating a new mesh with Gmsh, use quadratic elements (`gmsh -2 placa.geo -o placa.msh -order 2`), then run the Python preprocessor:
+1. **Preprocess the Mesh & Plasticity Parameters**:
    ```bash
    python preproc.py
    ```
-   *Outputs: `eq12cb.dat` and `geometry.png`.*
+   *Generates `eq12cb.dat` and `geometry.png`.*
 
-2. **Execution**: Run the Fortran BEM solver:
+2. **Run the 2D Elastoplastic BEM Solver**:
    ```bash
    ./elquabe_modern.exe
    ```
-   The solver reads `eq12cb.dat`, computes the elastostatic influence matrices across multiple threads, solves the linear system via LAPACK (`DGESV`), recovers boundary and internal stresses, and writes `eq12cb.out`, `dpbou.dat`, `dpint.dat`, `stbou.dat`, and `stint.dat`.
+   *Assembles elastic and domain-cell matrices in parallel, solves the incremental-iterative elastoplastic system, and writes `eq12cb.out`, `dpbou.dat`, `dpint.dat`, `stbou.dat`, and `stint.dat`.*
 
-3. **Post-Processing & Validation**: Compare the BEM numerical results with the analytical solution for the active problem and generate contour maps:
+3. **Post-Process & Compare Against Analytical Solution**:
    ```bash
    python posproc.py
    ```
-   *Outputs: `result_plot.png`, `displacement_map.png`, `von_mises_map.png`, and `resultado_elquabe.vtk`.*
+   *Computes relative $L_2$ errors against the Lamé–Hill analytical elastoplastic solution and generates `result_plot.png`, `displacement_map.png`, `von_mises_map.png`, `plastic_strain_map.png`, and `resultado_elquabe.vtk`.*
 
-## 📊 Sample Results
+---
 
-| Mesh & Boundary Conditions | Displacement Contour | von Mises Stress $\sigma_{\text{vM}}$ |
-| :---: | :---: | :---: |
-| ![Geometry](geometry.png) | ![Displacement](displacement_map.png) | ![von Mises](von_mises_map.png) |
+## 📊 Benchmark Validation: Thick-Walled Cylinder Under Internal Pressure
+
+For a quarter thick-walled cylinder ($a = 1.0\text{ m}$, $b = 1.5\text{ m}$, $E = 70\text{ GPa}$, $\nu = 0.3$) subjected to internal pressure $P = 10.0\text{ Pa}$ in **Plane Strain (`NSIG = 4`)** with a **von Mises** yield stress $\sigma_Y = 24.0\text{ Pa}$ (`NCRIT = 2`, elastic–perfectly plastic):
+
+- **Analytical Elastic–Plastic Interface Radius**: $c = 1.2015\text{ m}$
+- **Convergence**: 18 load increments, converging in 3 iterations per increment ($\text{RERR} < 10^{-6} < \text{TOLER} = 10^{-5}$)
+
+| Field Quantity | Global Relative $L_2$ Error (559 Nodes) |
+| :--- | :---: |
+| Radial Displacement $u_r(r)$ | **$0.44\%$** ($4.44 \times 10^{-3}$) |
+| Radial Stress $\sigma_r(r)$ | **$0.48\%$** ($4.77 \times 10^{-3}$) |
+| Hoop Stress $\sigma_\theta(r)$ | **$0.58\%$** ($5.83 \times 10^{-3}$) |
+| Equivalent von Mises Stress $\sigma_{\text{vM}}(r)$ | **$0.35\%$** ($3.45 \times 10^{-3}$) |
+
+### 2D Domain Contour Maps & Mesh
+
+| Mesh & Boundary Conditions | Radial Displacement $u_r$ |
+| :---: | :---: |
+| ![Geometry](geometry.png) | ![Displacement](displacement_map.png) |
+| **von Mises Equivalent Stress $\sigma_{\text{vM}}$** | **Equivalent Plastic Strain $\bar{\varepsilon}^p$** |
+| ![von Mises](von_mises_map.png) | ![Plastic Strain](plastic_strain_map.png) |
+
+### Analytical Lamé–Hill vs. 2D Elastoplastic BEM Profiles
 
 ![Analytical vs BEM Validation](result_plot.png)
 
+---
+
 ## 📖 References
 
+* **Gao, X.-W., & Davies, T. G.** (2001). *Boundary Element Programming in Mechanics*. Cambridge University Press.
 * **Brebbia, C. A., & Dominguez, J.** (1992). *Boundary Elements: An Introductory Course*. Computational Mechanics Publications & McGraw-Hill.
+* **Hill, R.** (1950). *The Mathematical Theory of Plasticity*. Oxford University Press.
 * **Johnston, P. R., & Elliott, D.** (2005). *A sinh transformation for evaluating nearly singular boundary element integrals*. International Journal for Numerical Methods in Engineering, 62(4), 564–578.

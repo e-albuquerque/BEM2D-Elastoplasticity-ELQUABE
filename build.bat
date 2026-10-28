@@ -7,9 +7,9 @@ if exist "C:\msys64\ucrt64\bin" (
     set "PATH=C:\msys64\ucrt64\bin;%PATH%"
 )
 
-echo Compiling Modernized ELQUABE...
+echo Compiling Modernized ELQUABE (2D Elastoplastic BEM)...
 gfortran -fopenmp -O3 -fdefault-real-8 -Wall -Wextra -static ^
-    data_mod.f90 io_mod.f90 assembly_mod.f90 solver_mod.f90 main.f90 ^
+    data_mod.f90 io_mod.f90 solver_mod.f90 assembly_mod.f90 main.f90 ^
     -o elquabe_modern.exe -llapack -lblas
 
 if %ERRORLEVEL% EQU 0 (

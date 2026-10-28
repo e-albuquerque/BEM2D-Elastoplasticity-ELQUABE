@@ -1,5 +1,5 @@
 # ==============================================================================
-# Makefile for Modernized ELQUABE (2D Elastostatic BEM)
+# Makefile for Modernized ELQUABE (2D Elastoplastic BEM)
 # ==============================================================================
 
 FC      = gfortran
@@ -13,7 +13,7 @@ else
     LDFLAGS =
 endif
 
-OBJS    = data_mod.o io_mod.o assembly_mod.o solver_mod.o main.o
+OBJS    = data_mod.o io_mod.o solver_mod.o assembly_mod.o main.o
 
 .PHONY: all clean run
 
@@ -28,13 +28,13 @@ data_mod.o: data_mod.f90
 io_mod.o: io_mod.f90 data_mod.o
 	$(FC) $(FFLAGS) -c io_mod.f90
 
-assembly_mod.o: assembly_mod.f90 data_mod.o
-	$(FC) $(FFLAGS) -c assembly_mod.f90
-
 solver_mod.o: solver_mod.f90
 	$(FC) $(FFLAGS) -c solver_mod.f90
 
-main.o: main.f90 data_mod.o io_mod.o assembly_mod.o solver_mod.o
+assembly_mod.o: assembly_mod.f90 data_mod.o solver_mod.o
+	$(FC) $(FFLAGS) -c assembly_mod.f90
+
+main.o: main.f90 data_mod.o io_mod.o solver_mod.o assembly_mod.o
 	$(FC) $(FFLAGS) -c main.f90
 
 run: $(TARGET)

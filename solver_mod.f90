@@ -54,4 +54,32 @@ contains
 2       format(' **** SINGULARITY OR LAPACK DGESV ERROR (INFO =', I5, ')')
     end subroutine SLNPD
 
+    !-------------------------------------------------------------------
+    !> @brief Solves the multiple right-hand side linear system
+    !>        A * X = B (where B is N x NRHS) using LAPACK's DGESV.
+    !-------------------------------------------------------------------
+    subroutine SLNPD_MULTI(A, B, N, NRHS, IPR)
+        implicit none
+        integer, intent(in) :: N, NRHS, IPR
+        real, intent(in)    :: A(N, N)
+        real, intent(inout) :: B(N, NRHS)
+
+        real,    allocatable :: A_COPY(:,:)
+        integer, allocatable :: IPIV(:)
+        integer :: INFO
+
+        allocate(A_COPY(N, N), IPIV(N))
+        A_COPY = A
+
+        call DGESV(N, NRHS, A_COPY, N, IPIV, B, N, INFO)
+
+        if (INFO /= 0) then
+            write(IPR, 2) INFO
+        end if
+
+        deallocate(A_COPY, IPIV)
+        return
+2       format(' **** SINGULARITY OR LAPACK DGESV ERROR IN SLNPD_MULTI (INFO =', I5, ')')
+    end subroutine SLNPD_MULTI
+
 end module solver_mod

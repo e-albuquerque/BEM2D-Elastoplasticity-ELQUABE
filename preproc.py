@@ -7,7 +7,6 @@ import meshio
 from input_data import input_data
 
 
-
 def ensure_mesh_exists(file_name):
     """
     Ensures `<file_name>.msh` exists. If missing, attempts to run Gmsh on
@@ -90,16 +89,28 @@ def ensure_mesh_exists(file_name):
 def compute_inodes(file_name, bound_cond):
     """
     Reads a Gmsh `.msh` file and extracts nodes, quadratic boundary elements,
-    1-based BEM boundary connectivity (`conec`), domain triangles, internal nodes,
-    and boundary condition mappings.
+    1-based BEM boundary connectivity (`conec`), domain internal cells (`triangle6`
+    with 6 nodes or `quad8` with 8 nodes), 1-based BEM cell connectivity (`conec_cells`),
+    internal nodes, and boundary condition mappings.
     """
     ensure_mesh_exists(file_name)
     mesh = meshio.read(file_name + '.msh')
     coordinates = mesh.points
     line_elements = mesh.cells_dict['line3']
-    triangle_elements = mesh.cells_dict['triangle6']
     segments = mesh.cell_data_dict['gmsh:physical']['line3']
     edges = mesh.field_data
+
+    # Detect quadratic domain cells: 8-node quadrilaterals ('quad8') or 6-node triangles ('triangle6')
+    if 'quad8' in mesh.cells_dict:
+        domain_cells = mesh.cells_dict['quad8']
+        nodc = 8
+    elif 'triangle6' in mesh.cells_dict:
+        domain_cells = mesh.cells_dict['triangle6']
+        nodc = 6
+    else:
+        raise ValueError("Mesh must contain 'triangle6' (6-node) or 'quad8' (8-node) internal cells.")
+
+    triangle_elements = mesh.cells_dict.get('triangle6', domain_cells)
 
     bc_info = {}
     for key, value in bound_cond.items():
@@ -131,8 +142,22 @@ def compute_inodes(file_name, bound_cond):
         conec[i, 2] = gmsh_to_bem[int(elem[1])]  # Node 3 (xi = +1)
 
     boundary_nodes = np.unique(line_elements)
-    all_nodes = np.unique(triangle_elements)
-    internal_nodes = [node for node in all_nodes if node not in boundary_nodes]
+    all_nodes = np.unique(domain_cells)
+    internal_nodes = [int(node) for node in all_nodes if node not in boundary_nodes]
+
+    # Map internal nodes to 1-based BEM global indices N + 1 .. N + L
+    n_bou = len(ordered_boundary_nodes)
+    for k, gmsh_node in enumerate(internal_nodes):
+        gmsh_to_bem[int(gmsh_node)] = n_bou + k + 1
+
+    # Build 1-based BEM internal cell connectivity matrix (NCELL x NODC)
+    # For triangle6: [corner1, corner2, corner3, mid12, mid23, mid31]
+    # For quad8    : [corner1, corner2, corner3, corner4, mid12, mid23, mid34, mid41]
+    ncell = domain_cells.shape[0]
+    conec_cells = np.zeros((ncell, nodc), dtype=np.int64)
+    for icell, cell in enumerate(domain_cells):
+        for j in range(nodc):
+            conec_cells[icell, j] = gmsh_to_bem[int(cell[j])]
 
     return {
         'nodes': boundary_nodes,
@@ -143,6 +168,10 @@ def compute_inodes(file_name, bound_cond):
         'coordinates': coordinates,
         'elements': line_elements,
         'triangles': triangle_elements,
+        'domain_cells': domain_cells,
+        'nodc': nodc,
+        'conec_cells': conec_cells,
+        'gmsh_to_bem': gmsh_to_bem,
         'segments': segments,
         'bc_info': bc_info,
     }
@@ -239,14 +268,7 @@ def comp_xyplot(elem, nodes):
 def show_geometry(coord, xplot, yplot, elem, tri6, type_bcs, val_bcs, save_path='geometry.png'):
     """
     Visualizes the quadratic mesh and global (x, y) boundary conditions of the 2D
-    elastostatic problem, saving the figure to `geometry.png`.
-
-    Adapted from `show_problem` in `graphics.py` for continuous 3-node quadratic
-    boundary elements and boundary conditions prescribed in the global xy system:
-      - Dirichlet BCs (known displacement): red markers ('rx' for x, 'rP' for y)
-        and red arrows.
-      - Neumann BCs (known traction): blue markers ('bx' for x, 'bP' for y)
-        and blue arrows.
+    elastoplastic problem, saving the figure to `geometry.png`.
     """
     num_elements = elem.shape[0]
     b_nodes = np.zeros((3 * num_elements, 2), dtype=np.float64)
@@ -281,9 +303,14 @@ def show_geometry(coord, xplot, yplot, elem, tri6, type_bcs, val_bcs, save_path=
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.grid(True, linestyle='--', alpha=0.4)
 
-    # Plot the underlying triangular mesh
-    tri3 = tri6[:, :3]
-    ax.triplot(coord[:, 0], coord[:, 1], tri3, color="black", linewidth=0.4)
+    # Plot the underlying cell mesh
+    if tri6.shape[1] == 6:
+        tri3 = tri6[:, :3]
+        ax.triplot(coord[:, 0], coord[:, 1], tri3, color="black", linewidth=0.4)
+    elif tri6.shape[1] == 8:
+        for q in tri6:
+            pts_q = coord[[q[0], q[4], q[1], q[5], q[2], q[6], q[3], q[7], q[0]], :2]
+            ax.plot(pts_q[:, 0], pts_q[:, 1], color="black", linewidth=0.4)
 
     # Plot quadratic boundary element curves
     for i in range(num_elements):
@@ -332,8 +359,6 @@ def show_geometry(coord, xplot, yplot, elem, tri6, type_bcs, val_bcs, save_path=
         )
 
     # Plot nodes with known traction (blue markers) and known displacement (red markers)
-    # Note: red markers (Dirichlet) are plotted after blue markers so shared corner
-    # nodes with prescribed displacement remain visible in continuous elements.
     ax.plot(b_nodes[indknown_tx, 0], b_nodes[indknown_tx, 1], 'bx', markersize=6, label='Known $t_x$')
     ax.plot(b_nodes[indknown_ty, 0], b_nodes[indknown_ty, 1], 'bP', markersize=4, label='Known $t_y$')
     ax.plot(b_nodes[indknown_ux, 0], b_nodes[indknown_ux, 1], 'rx', markersize=6, label='Known $u_x$')
@@ -344,7 +369,7 @@ def show_geometry(coord, xplot, yplot, elem, tri6, type_bcs, val_bcs, save_path=
     ax.set_ylim(y_min - 0.15 * delta_y, y_max + 0.15 * delta_y)
     ax.set_xlabel('x')
     ax.set_ylabel('y')
-    ax.set_title('Mesh and Boundary Conditions (ELQUABE)')
+    ax.set_title('Mesh, Internal Cells and Boundary Conditions (ELQUABE)')
 
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     print(f"Geometry plot saved to '{save_path}'.")
@@ -371,9 +396,18 @@ def format_bc_val(val):
 
 def create_input_file(filename, computed_data, int_points, type_bcs, val_bcs, input_params):
     """
-    Writes the formatted input file (`eq12cb.dat`) for the Fortran ELQUABE solver,
-    including boundary node coordinates, element connectivity matrix, boundary
-    conditions, and internal point coordinates.
+    Writes the formatted input file (`eq12cb.dat`) for the Fortran ELQUABE 2D
+    Elastoplastic BEM solver, including:
+      1. Title
+      2. Basic parameters (NE, L, GE, XNU)
+      3. Boundary node coordinates
+      4. Boundary element connectivity (CONEC)
+      5. Boundary conditions (KODE, DFI)
+      6. Internal point coordinates
+      7. Internal cell parameters (NCELL, NODC, NSIG, TOLGP, NAUTO)
+      8. Internal cell connectivity (LNDC: NCELL lines with NODC nodes each)
+      9. Plasticity material properties (NCRIT, UNIAX, FRICT, HARDI, HARDK, EM)
+     10. Incremental-iterative control parameters (NINCS, FINCR, MITER, TOLER)
     """
     with open(filename, 'w') as f:
         # 1. Title Line
@@ -383,6 +417,9 @@ def create_input_file(filename, computed_data, int_points, type_bcs, val_bcs, in
         elements = computed_data['elements']
         ordered_boundary_nodes = computed_data['ordered_boundary_nodes']
         conec = computed_data['conec']
+        conec_cells = computed_data['conec_cells']
+        nodc = computed_data['nodc']
+        ncell = conec_cells.shape[0]
         num_elements = elements.shape[0]
         num_internal_points = len(int_points)
 
@@ -415,12 +452,44 @@ def create_input_file(filename, computed_data, int_points, type_bcs, val_bcs, in
             f.write(f"{type_bcs[i, 5]} {format_bc_val(val_bcs[i, 5])} \n")
 
         # 6. Internal Points Coordinates Line
-        int_points_str = " ".join(
-            f"{format_coord(nodes[p][0])}  {format_coord(nodes[p][1])}" for p in int_points
-        )
-        f.write(" " + int_points_str + "\n")
+        if num_internal_points > 0:
+            int_points_str = " ".join(
+                f"{format_coord(nodes[p][0])}  {format_coord(nodes[p][1])}" for p in int_points
+            )
+            f.write(" " + int_points_str + "\n")
 
-    print(f"Input file '{filename}' generated successfully.")
+        # 7. Internal Cell Control Parameters: NCELL, NODC, NSIG, TOLGP, NAUTO
+        plast = input_params.get('plasticity', {})
+        nsig = plast.get('nsig', 4)
+        tolgp = plast.get('tolgp', 1.0e-5)
+        nauto = plast.get('nauto', -6)
+        f.write(f" {ncell} {nodc} {nsig} {tolgp:.6e} {nauto}\n")
+
+        # 8. Internal Cell Connectivity Matrix (NCELL lines: NODC global BEM node indices per cell)
+        for icell in range(ncell):
+            cell_nodes_str = " ".join(str(int(nd)) for nd in conec_cells[icell, :])
+            f.write(f" {cell_nodes_str}\n")
+
+        # 9. Material Plasticity Properties: NCRIT, UNIAX, FRICT, HARDI, HARDK, EM
+        ncrit = plast.get('ncrit', 2)
+        uniax = plast.get('uniax', 24.0)
+        frict = plast.get('frict', 0.0)
+        hardi = plast.get('hardi', 0.0)
+        hardk = plast.get('hardk', 0.0)
+        em = plast.get('em', 1.0)
+        f.write(f" {ncrit} {uniax:.8e} {frict:.8e} {hardi:.8e} {hardk:.8e} {em:.8e}\n")
+
+        # 10. Incremental-Iterative Parameters: NINCS, FINCR, MITER, TOLER
+        nincs = plast.get('nincs', 0)
+        fincr = plast.get('fincr', 0.95)
+        miter = plast.get('miter', 50)
+        toler = plast.get('toler', 1.0e-5)
+        f.write(f" {nincs} {fincr:.6f} {miter} {toler:.6e}\n")
+
+    print(
+        f"Input file '{filename}' generated successfully "
+        f"(NE={num_elements}, L={num_internal_points}, NCELL={ncell}, NODC={nodc})."
+    )
 
 
 if __name__ == '__main__':
@@ -438,7 +507,7 @@ if __name__ == '__main__':
         xplot,
         yplot,
         computed_data['elements'],
-        computed_data['triangles'],
+        computed_data['domain_cells'],
         type_bcs,
         val_bcs,
     )
