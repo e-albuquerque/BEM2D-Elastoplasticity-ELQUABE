@@ -70,7 +70,8 @@ The solver models two-dimensional (**Plane Strain** and **Plane Stress**) elasti
 - `input_data.py`: Problem configuration, elastic properties ($E, \nu$), boundary conditions, and plasticity dictionary (`nsig`, `tolgp`, `nauto`, `ncrit`, `uniax`, `frict`, `hardi`, `hardk`, `em`, `nincs`, `fincr`, `miter`, `toler`).
 - `preproc.py`: Gmsh mesh reader, cell connectivity mapper, boundary condition builder, and `eq12cb.dat` generator.
 - `posproc.py`: Analytical Lamé–Hill elastoplastic cylinder validation, error computation, VTK exporter, and 2D contour plotter.
-- `fluxogram.py`: Graphviz script that generates the program workflow diagram (`diagrama_graphviz.png`).
+- `fluxogram.py`: Graphviz script that generates the program workflow diagrams (`diagrama_graphviz.png` and `diagrama_nl_graphviz.png`).
+- `Run_elquabe_plastic_on_Colab.ipynb`: Google Colab notebook for running the complete 2D elastoplastic BEM pipeline in the cloud.
 - `placa.geo` / `placa.msh`: Gmsh geometry and quadratic mesh (`50` `line3` boundary elements, `459` internal nodes, and `254` `triangle6` internal cells) for the quarter thick-walled cylinder under internal pressure.
 
 ### Output Data Files
